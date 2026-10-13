@@ -1,0 +1,31 @@
+{
+  "name": "@comic-captioner/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@comic-captioner/ai": "workspace:*",
+    "@comic-captioner/audio-engine": "workspace:*",
+    "@comic-captioner/core": "workspace:*",
+    "@comic-captioner/rendering": "workspace:*",
+    "@comic-captioner/shared": "workspace:*",
+    "@tailwindcss/vite": "^4.1.13",
+    "@vitejs/plugin-react": "^5.0.4",
+    "clipper-lib": "^6.4.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "tailwindcss": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  }
+}

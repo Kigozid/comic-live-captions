@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "id": "simple",
+  "description": "Synthetic simple comic page pair; generated vector art, not scanned or licensed comic material.",
+  "dimensions": {
+    "width": 640,
+    "height": 480
+  },
+  "coordinateSpace": {
+    "id": "image:page",
+    "kind": "image",
+    "pixelCenters": "integer",
+    "origin": "top-left",
+    "xAxis": "right",
+    "yAxis": "down"
+  },
+  "sourceFiles": {
+    "original": "original.png",
+    "cleaned": "cleaned.png"
+  },
+  "expected": {
+    "bubbles": [
+      {
+        "id": "bubble-1",
+        "kind": "speech",
+        "polygon": [
+          {
+            "x": 472,
+            "y": 105
+          },
+          {
+            "x": 479.41,
+            "y": 105.73
+          },
+          {
+            "x": 486.54,
+            "y": 107.89
+          },
+          {
+            "x": 493.11,
+            "y": 111.4
+          },
+          {
+            "x": 498.87,
+            "y": 116.13
+          },
+          {
+            "x": 503.6,
+            "y": 121.89
+          },
+          {
+            "x": 507.11,
+            "y": 128.46
+          },
+          {
+            "x": 509.27,
+            "y": 135.59
+          },
+          {
+            "x": 510,
+            "y": 143
+          },
+          {
+            "x": 510,
+            "y": 297
+          },
+          {
+            "x": 509.27,
+            "y": 304.41
+          },
+          {
+            "x": 507.11,
+            "y": 311.54
+          },
+          {
+            "x": 503.6,
+            "y": 318.11
+          },
+          {
+            "x": 498.87,
+            "y": 323.87
+          },
+          {
+            "x": 493.11,
+            "y": 328.6
+          },
+          {
+            "x": 486.54,
+            "y": 332.11
+          },
+          {
+            "x": 479.41,
+            "y": 334.27
+          },
+          {
+            "x": 472,
+            "y": 335
+          },
+          {
+            "x": 168,
+            "y": 335
+          },
+          {
+            "x": 160.59,
+            "y": 334.27
+          },
+          {
+            "x": 153.46,
+            "y": 332.11
+          },
+          {
+            "x": 146.89,
+            "y": 328.6
+          },
+          {
+            "x": 141.13,
+            "y": 323.87
+          },
+          {
+            "x": 136.4,
+            "y": 318.11
+          },
+          {
+            "x": 132.89,
+            "y": 311.54
+          },
+          {
+            "x": 130.73,
+            "y": 304.41
+          },
+          {
+            "x": 130,
+            "y": 297
+          },
+          {
+            "x": 130,
+            "y": 143
+          },
+          {
+            "x": 130.73,
+            "y": 135.59
+          },
+          {
+            "x": 132.89,
+            "y": 128.46
+          },
+          {
+            "x": 136.4,
+            "y": 121.89
+          },
+          {
+            "x": 141.13,
+            "y": 116.13
+          },
+          {
+            "x": 146.89,
+            "y": 111.4
+          },
+          {
+            "x": 153.46,
+            "y": 107.89
+          },
+          {
+            "x": 160.59,
+            "y": 105.73
+          },
+          {
+            "x": 168,
+            "y": 105
+          }
+        ],
+        "boundingBox": {
+          "x": 130,
+          "y": 105,
+          "width": 380,
+          "height": 230
+        },
+        "tail": [
+          {
+            "x": 300,
+            "y": 320
+          },
+          {
+            "x": 278,
+            "y": 385
+          },
+          {
+            "x": 340,
+            "y": 320
+          }
+        ],
+        "maskFile": "expected/bubble-1-mask.png"
+      }
+    ],
+    "textRegions": [
+      {
+        "id": "text-bubble-1",
+        "bubbleId": "bubble-1",
+        "boundingBox": {
+          "x": 279.75,
+          "y": 198.15,
+          "width": 80.5,
+          "height": 43.7
+        },
+        "polygon": [
+          {
+            "x": 279.75,
+            "y": 198.15
+          },
+          {
+            "x": 360.25,
+            "y": 198.15
+          },
+          {
+            "x": 360.25,
+            "y": 241.85000000000002
+          },
+          {
+            "x": 279.75,
+            "y": 241.85000000000002
+          }
+        ],
+        "maskFile": "expected/bubble-1-text-mask.png"
+      }
+    ],
+    "ocr": [
+      {
+        "id": "ocr-bubble-1",
+        "bubbleId": "bubble-1",
+        "text": "HELLO",
+        "confidence": 1,
+        "boundingBox": {
+          "x": 279.75,
+          "y": 198.15,
+          "width": 80.5,
+          "height": 43.7
+        },
+        "coordinateSpaceId": "image:page"
+      }
+    ],
+    "dialogueMappings": [
+      {
+        "id": "mapping-bubble-1",
+        "transcriptSegmentId": "segment-bubble-1",
+        "bubbleId": "bubble-1",
+        "confidence": 1,
+        "expectedIntervalSeconds": {
+          "start": 0.2,
+          "end": 1.4
+        }
+      }
+    ]
+  }
+}

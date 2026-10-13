@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "id": "irregular",
+  "description": "Synthetic irregular comic page pair; generated vector art, not scanned or licensed comic material.",
+  "dimensions": {
+    "width": 640,
+    "height": 480
+  },
+  "coordinateSpace": {
+    "id": "image:page",
+    "kind": "image",
+    "pixelCenters": "integer",
+    "origin": "top-left",
+    "xAxis": "right",
+    "yAxis": "down"
+  },
+  "sourceFiles": {
+    "original": "original.png",
+    "cleaned": "cleaned.png"
+  },
+  "expected": {
+    "bubbles": [
+      {
+        "id": "bubble-1",
+        "kind": "speech",
+        "polygon": [
+          {
+            "x": 555,
+            "y": 225
+          },
+          {
+            "x": 497.05,
+            "y": 255.28
+          },
+          {
+            "x": 523.52,
+            "y": 300
+          },
+          {
+            "x": 449.61,
+            "y": 307.73
+          },
+          {
+            "x": 437.5,
+            "y": 354.9
+          },
+          {
+            "x": 367.44,
+            "y": 338.01
+          },
+          {
+            "x": 320,
+            "y": 375
+          },
+          {
+            "x": 272.56,
+            "y": 338.01
+          },
+          {
+            "x": 202.5,
+            "y": 354.9
+          },
+          {
+            "x": 190.39,
+            "y": 307.73
+          },
+          {
+            "x": 116.48,
+            "y": 300
+          },
+          {
+            "x": 142.95,
+            "y": 255.28
+          },
+          {
+            "x": 85,
+            "y": 225
+          },
+          {
+            "x": 142.95,
+            "y": 194.72
+          },
+          {
+            "x": 116.48,
+            "y": 150
+          },
+          {
+            "x": 190.39,
+            "y": 142.27
+          },
+          {
+            "x": 202.5,
+            "y": 95.1
+          },
+          {
+            "x": 272.56,
+            "y": 111.99
+          },
+          {
+            "x": 320,
+            "y": 75
+          },
+          {
+            "x": 367.44,
+            "y": 111.99
+          },
+          {
+            "x": 437.5,
+            "y": 95.1
+          },
+          {
+            "x": 449.61,
+            "y": 142.27
+          },
+          {
+            "x": 523.52,
+            "y": 150
+          },
+          {
+            "x": 497.05,
+            "y": 194.72
+          }
+        ],
+        "boundingBox": {
+          "x": 85,
+          "y": 75,
+          "width": 470,
+          "height": 300
+        },
+        "tail": [
+          {
+            "x": 405,
+            "y": 337
+          },
+          {
+            "x": 457,
+            "y": 405
+          },
+          {
+            "x": 435,
+            "y": 324
+          }
+        ],
+        "maskFile": "expected/bubble-1-mask.png"
+      }
+    ],
+    "textRegions": [
+      {
+        "id": "text-bubble-1",
+        "bubbleId": "bubble-1",
+        "boundingBox": {
+          "x": 225.5,
+          "y": 196.5,
+          "width": 189,
+          "height": 57
+        },
+        "polygon": [
+          {
+            "x": 225.5,
+            "y": 196.5
+          },
+          {
+            "x": 414.5,
+            "y": 196.5
+          },
+          {
+            "x": 414.5,
+            "y": 253.5
+          },
+          {
+            "x": 225.5,
+            "y": 253.5
+          }
+        ],
+        "maskFile": "expected/bubble-1-text-mask.png"
+      }
+    ],
+    "ocr": [
+      {
+        "id": "ocr-bubble-1",
+        "bubbleId": "bubble-1",
+        "text": "LOOK OUT!",
+        "confidence": 1,
+        "boundingBox": {
+          "x": 225.5,
+          "y": 196.5,
+          "width": 189,
+          "height": 57
+        },
+        "coordinateSpaceId": "image:page"
+      }
+    ],
+    "dialogueMappings": [
+      {
+        "id": "mapping-bubble-1",
+        "transcriptSegmentId": "segment-bubble-1",
+        "bubbleId": "bubble-1",
+        "confidence": 1,
+        "expectedIntervalSeconds": {
+          "start": 0.5,
+          "end": 1.25
+        }
+      }
+    ]
+  }
+}

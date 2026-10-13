@@ -1,0 +1,1620 @@
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
+import {
+  dimensionsMatch,
+  AlignmentError,
+  ImageAlignmentEngine,
+  ImmutableSourceImage,
+  MAX_SOURCE_IMAGE_BYTES,
+  SourceImageImportError,
+  applyManualAlignment,
+  renderAlignedCleanedImage,
+  renderAlignmentVisualizations,
+  parseOCRDocument,
+  TextDifferenceEngine,
+  type AlignmentResult,
+  type TextDifferenceResult,
+  type SourceImageRole,
+} from '@comic-captioner/image-engine';
+import {
+  AssistError,
+  DialogueMappingEngine,
+  GeminiAssistProvider,
+  GeminiAssistService,
+  GeminiTranscriptionError,
+  GeminiTranscriptionProvider,
+  type AssistInput,
+} from '@comic-captioner/ai';
+import type { BubbleDialogueReference } from '@comic-captioner/core';
+import {
+  BubbleDetectionEngine,
+  BubbleDialogueAssociationEngine,
+  CaptionSafeRegionEngine,
+} from '@comic-captioner/bubble-engine';
+import type {
+  ImageSpace,
+  OCRLine,
+  OriginalTextRegion,
+} from '@comic-captioner/shared';
+import { createImageSpace, createMaskSpace } from '@comic-captioner/shared';
+import {
+  CaptionFittingEngine,
+  type CaptionFontMetrics,
+} from '@comic-captioner/caption-engine';
+import {
+  TranscriptionError,
+  TranscriptionService,
+  type AudioAssetMetadata,
+  type TranscriptSegment,
+} from '@comic-captioner/audio-engine';
+import { createHash } from 'node:crypto';
+import { scanWithLocalOCR, type OCRBubbleInput } from './local-ocr.js';
+
+const serviceName = 'comic-captioner-api';
+const alignmentEngine = new ImageAlignmentEngine();
+const textDifferenceEngine = new TextDifferenceEngine();
+const bubbleDetectionEngine = new BubbleDetectionEngine();
+const bubbleAssociationEngine = new BubbleDialogueAssociationEngine();
+const safeRegionEngine = new CaptionSafeRegionEngine();
+const captionFittingEngine = new CaptionFittingEngine();
+const paddleModelUrlByRoute = {
+  '/api/ocr-models/detection':
+    'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_mobile_det_onnx_infer.tar',
+  '/api/ocr-models/recognition':
+    'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_mobile_rec_onnx_infer.tar',
+} as const;
+const paddleModelCache = new Map<string, Promise<Buffer>>();
+
+interface ApiState {
+  readonly sourceImages: Map<SourceImageRole, ImmutableSourceImage>;
+  alignment: AlignmentResult | null;
+  visualizations: {
+    readonly overlayPng: Buffer;
+    readonly differencePng: Buffer;
+  } | null;
+  textDifferences: TextDifferenceResult | null;
+}
+
+class RequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
+  response.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+  });
+  response.end(JSON.stringify(body));
+}
+
+function currentPair(sourceImages: Map<SourceImageRole, ImmutableSourceImage>) {
+  const original = sourceImages.get('original')?.metadata ?? null;
+  const cleaned = sourceImages.get('cleaned')?.metadata ?? null;
+  return {
+    original,
+    cleaned,
+    dimensionsMatch: dimensionsMatch(original, cleaned),
+  };
+}
+
+async function readMultipartImage(request: IncomingMessage) {
+  const contentType = request.headers['content-type'] ?? '';
+  const boundaryMatch = contentType.match(
+    /\bboundary=(?:"([^"]+)"|([^;\s]+))/i,
+  );
+  const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
+  if (
+    !contentType.toLowerCase().startsWith('multipart/form-data') ||
+    !boundary ||
+    boundary.length > 70 ||
+    /[\r\n]/.test(boundary)
+  ) {
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'Send an image as multipart form data.',
+    );
+  }
+
+  const chunks: Buffer[] = [];
+  let bodySize = 0;
+  const maximumBodyBytes = MAX_SOURCE_IMAGE_BYTES + 256 * 1024;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bodySize += bytes.byteLength;
+    if (bodySize > maximumBodyBytes) {
+      throw new RequestError(
+        413,
+        'FILE_TOO_LARGE',
+        'Image files must be 50 MiB or smaller.',
+      );
+    }
+    chunks.push(bytes);
+  }
+
+  const body = Buffer.concat(chunks);
+  const opening = Buffer.from(`--${boundary}\r\n`);
+  const headerSeparator = Buffer.from('\r\n\r\n');
+  const partBoundary = Buffer.from(`\r\n--${boundary}`);
+  if (!body.subarray(0, opening.length).equals(opening)) {
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'The upload form could not be read.',
+    );
+  }
+
+  const headersStart = opening.length;
+  const headersEnd = body.indexOf(headerSeparator, headersStart);
+  if (headersEnd < 0) {
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'The upload form could not be read.',
+    );
+  }
+  const headers = body.toString('latin1', headersStart, headersEnd);
+  const disposition = headers.match(
+    /^content-disposition:\s*form-data;([^\r\n]+)$/im,
+  )?.[1];
+  const fieldName = disposition?.match(/\bname="([^"]+)"/i)?.[1];
+  const filename = disposition?.match(/\bfilename="([^"]*)"/i)?.[1];
+  if (fieldName !== 'image' || !filename) {
+    throw new RequestError(
+      400,
+      'IMAGE_REQUIRED',
+      'Upload exactly one file in the image field.',
+    );
+  }
+
+  const fileStart = headersEnd + headerSeparator.length;
+  const fileEnd = body.indexOf(partBoundary, fileStart);
+  if (fileEnd < 0) {
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'The upload form could not be read.',
+    );
+  }
+  const nextBoundaryStart = fileEnd + partBoundary.length;
+  const closingTail = body.subarray(nextBoundaryStart);
+  if (
+    !closingTail.equals(Buffer.from('--')) &&
+    !closingTail.equals(Buffer.from('--\r\n'))
+  ) {
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'Upload exactly one image file.',
+    );
+  }
+
+  const bytes = body.subarray(fileStart, fileEnd);
+  if (bytes.byteLength > MAX_SOURCE_IMAGE_BYTES) {
+    throw new RequestError(
+      413,
+      'FILE_TOO_LARGE',
+      'Image files must be 50 MiB or smaller.',
+    );
+  }
+  return { filename, bytes: Buffer.from(bytes) };
+}
+
+async function readMultipartAudio(request: IncomingMessage) {
+  const contentType = request.headers['content-type'] ?? '';
+  const boundary =
+    contentType.match(/\bboundary=(?:"([^"]+)"|([^;\s]+))/i)?.[1] ??
+    contentType.match(/\bboundary=(?:"([^"]+)"|([^;\s]+))/i)?.[2];
+  if (
+    !contentType.toLowerCase().startsWith('multipart/form-data') ||
+    !boundary ||
+    boundary.length > 70 ||
+    /[\r\n]/.test(boundary)
+  )
+    throw new RequestError(
+      400,
+      'INVALID_MULTIPART',
+      'Send an audio file and its metadata as multipart form data.',
+    );
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.byteLength;
+    if (size > 201 * 1024 * 1024)
+      throw new RequestError(
+        413,
+        'FILE_TOO_LARGE',
+        'Audio files must be 200 MiB or smaller.',
+      );
+    chunks.push(bytes);
+  }
+  const body = Buffer.concat(chunks);
+  const marker = Buffer.from(`--${boundary}`);
+  const separator = Buffer.from('\r\n\r\n');
+  let cursor = marker.length + 2;
+  let audio: { filename: string; mimeType: string; bytes: Buffer } | null =
+    null;
+  let metadataText: string | null = null;
+  while (cursor < body.length) {
+    const headerEnd = body.indexOf(separator, cursor);
+    if (headerEnd < 0)
+      throw new RequestError(
+        400,
+        'INVALID_MULTIPART',
+        'Audio upload headers are malformed.',
+      );
+    const headers = body.toString('latin1', cursor, headerEnd);
+    const disposition =
+      headers.match(/^content-disposition:\s*form-data;([^\r\n]+)$/im)?.[1] ??
+      '';
+    const field = disposition.match(/\bname="([^"]+)"/i)?.[1];
+    const filename = disposition.match(/\bfilename="([^"]*)"/i)?.[1];
+    const mimeType =
+      headers
+        .match(/^content-type:\s*([^\r\n;]+)/im)?.[1]
+        ?.trim()
+        .toLowerCase() ?? 'application/octet-stream';
+    const valueStart = headerEnd + separator.length;
+    const nextPart = body.indexOf(Buffer.from(`\r\n--${boundary}`), valueStart);
+    if (nextPart < 0)
+      throw new RequestError(
+        400,
+        'INVALID_MULTIPART',
+        'Audio upload body is malformed.',
+      );
+    const value = body.subarray(valueStart, nextPart);
+    if (field === 'audio' && filename && !audio)
+      audio = { filename, mimeType, bytes: Buffer.from(value) };
+    else if (field === 'metadata' && !filename && metadataText === null)
+      metadataText = value.toString('utf8');
+    else
+      throw new RequestError(
+        400,
+        'INVALID_MULTIPART',
+        'Include exactly one audio file and one metadata field.',
+      );
+    cursor = nextPart + 2 + marker.length;
+    const ending = body.subarray(cursor, cursor + 2).toString('latin1');
+    if (ending === '--') break;
+    if (ending !== '\r\n')
+      throw new RequestError(
+        400,
+        'INVALID_MULTIPART',
+        'Audio upload boundary is malformed.',
+      );
+    cursor += 2;
+  }
+  if (!audio || !metadataText)
+    throw new RequestError(
+      400,
+      'AUDIO_REQUIRED',
+      'Include one audio file and its metadata.',
+    );
+  if (audio.bytes.byteLength === 0)
+    throw new RequestError(400, 'EMPTY_FILE', 'Choose a non-empty audio file.');
+  let value: unknown;
+  try {
+    value = JSON.parse(metadataText) as unknown;
+  } catch {
+    throw new RequestError(
+      400,
+      'INVALID_AUDIO_METADATA',
+      'Audio metadata must be valid JSON.',
+    );
+  }
+  const asset = validateAudioMetadata(value, audio);
+  if (createHash('sha256').update(audio.bytes).digest('hex') !== asset.sha256)
+    throw new RequestError(
+      422,
+      'AUDIO_HASH_MISMATCH',
+      'Uploaded audio does not match the imported asset hash.',
+    );
+  return { audio, asset };
+}
+
+function validateAudioMetadata(
+  value: unknown,
+  audio: { filename: string; mimeType: string; bytes: Buffer },
+): AudioAssetMetadata {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new RequestError(
+      400,
+      'INVALID_AUDIO_METADATA',
+      'Audio metadata must be an object.',
+    );
+  const candidate = value as Record<string, unknown>;
+  const formats = ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'webm'] as const;
+  const format = candidate.format;
+  if (
+    typeof candidate.id !== 'string' ||
+    !/^audio-[a-f\d]{20}$/i.test(candidate.id) ||
+    candidate.filename !== audio.filename ||
+    typeof format !== 'string' ||
+    !formats.includes(format as (typeof formats)[number]) ||
+    candidate.sizeBytes !== audio.bytes.byteLength ||
+    typeof candidate.sha256 !== 'string' ||
+    !/^[a-f\d]{64}$/i.test(candidate.sha256) ||
+    typeof candidate.durationSeconds !== 'number' ||
+    !Number.isFinite(candidate.durationSeconds) ||
+    candidate.durationSeconds <= 0 ||
+    candidate.durationSeconds > 30 * 60 ||
+    typeof candidate.sampleRateHz !== 'number' ||
+    !Number.isInteger(candidate.sampleRateHz) ||
+    candidate.sampleRateHz < 8000 ||
+    candidate.sampleRateHz > 384000 ||
+    typeof candidate.channelCount !== 'number' ||
+    !Number.isInteger(candidate.channelCount) ||
+    candidate.channelCount < 1 ||
+    candidate.channelCount > 32
+  )
+    throw new RequestError(
+      400,
+      'INVALID_AUDIO_METADATA',
+      'Audio metadata is missing valid identity, format, duration, size, rate, or channel values.',
+    );
+  const timebase = candidate.timebase;
+  if (
+    !timebase ||
+    typeof timebase !== 'object' ||
+    (timebase as Record<string, unknown>).id !== `audio:${candidate.id}` ||
+    (timebase as Record<string, unknown>).unit !== 'seconds'
+  )
+    throw new RequestError(
+      400,
+      'INVALID_AUDIO_TIMEBASE',
+      'Audio timebase must identify this asset and use seconds.',
+    );
+  const mediaTypes: Record<string, string[]> = {
+    mp3: ['audio/mpeg', 'audio/mp3'],
+    wav: ['audio/wav', 'audio/x-wav'],
+    m4a: ['audio/mp4', 'audio/m4a', 'audio/x-m4a'],
+    aac: ['audio/aac', 'audio/aacp'],
+    ogg: ['audio/ogg', 'application/ogg'],
+    webm: ['audio/webm'],
+  };
+  if (
+    format !== audio.filename.toLowerCase().split('.').at(-1) ||
+    !mediaTypes[format]?.includes(audio.mimeType)
+  )
+    throw new RequestError(
+      415,
+      'UNSUPPORTED_AUDIO_FORMAT',
+      'Filename, media type, and audio format must match a supported format.',
+    );
+  return {
+    id: candidate.id,
+    filename: candidate.filename as string,
+    format: format as AudioAssetMetadata['format'],
+    mediaType: audio.mimeType,
+    sizeBytes: candidate.sizeBytes as number,
+    sha256: candidate.sha256 as string,
+    durationSeconds: candidate.durationSeconds as number,
+    sampleRateHz: candidate.sampleRateHz as number,
+    channelCount: candidate.channelCount as number,
+    frameCount: Math.round(
+      (candidate.durationSeconds as number) *
+        (candidate.sampleRateHz as number),
+    ),
+    timebase: timebase as AudioAssetMetadata['timebase'],
+  };
+}
+
+async function readJsonBody(
+  request: IncomingMessage,
+  maximumBytes = 16 * 1024,
+): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.byteLength;
+    if (size > maximumBytes)
+      throw new RequestError(
+        413,
+        'BODY_TOO_LARGE',
+        'The correction request is too large.',
+      );
+    chunks.push(bytes);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    throw new RequestError(
+      400,
+      'INVALID_JSON',
+      'Send a valid JSON request body.',
+    );
+  }
+}
+
+function parseAutomationSegments(value: unknown): TranscriptSegment[] {
+  const transcript = asRecord(value);
+  const segments = transcript.segments;
+  const timebase = asRecord(transcript.timebase);
+  if (
+    !Array.isArray(segments) ||
+    segments.length === 0 ||
+    segments.length > 2000 ||
+    typeof transcript.durationSeconds !== 'number' ||
+    !Number.isFinite(transcript.durationSeconds) ||
+    transcript.durationSeconds <= 0 ||
+    typeof timebase.id !== 'string' ||
+    !timebase.id ||
+    timebase.unit !== 'seconds'
+  )
+    throw new RequestError(
+      400,
+      'INVALID_TRANSCRIPT',
+      'Provide a reviewed transcript with second-based timestamps.',
+    );
+  let previousStart = -1;
+  return segments.map((item, index) => {
+    const segment = asRecord(item);
+    const interval = asRecord(segment.interval);
+    const start = asRecord(interval.start);
+    const end = asRecord(interval.end);
+    if (
+      typeof segment.id !== 'string' ||
+      !segment.id ||
+      typeof segment.text !== 'string' ||
+      !segment.text.trim() ||
+      segment.text.length > 4000 ||
+      typeof start.value !== 'number' ||
+      typeof end.value !== 'number' ||
+      !Number.isFinite(start.value) ||
+      !Number.isFinite(end.value) ||
+      start.value < previousStart ||
+      end.value <= start.value ||
+      end.value > (transcript.durationSeconds as number) ||
+      start.timebase !== timebase.id ||
+      end.timebase !== timebase.id ||
+      start.unit !== 'seconds' ||
+      end.unit !== 'seconds' ||
+      (segment.speakerId !== null && typeof segment.speakerId !== 'string')
+    )
+      throw new RequestError(
+        400,
+        'INVALID_TRANSCRIPT',
+        `Transcript segment ${index + 1} has invalid text, speaker, or timing.`,
+      );
+    if (
+      typeof segment.speakerId === 'string' &&
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(segment.speakerId)
+    )
+      throw new RequestError(
+        400,
+        'INVALID_TRANSCRIPT',
+        `Transcript segment ${index + 1} has an invalid speaker ID.`,
+      );
+    previousStart = start.value;
+    return {
+      id: segment.id,
+      text: segment.text,
+      interval: {
+        start: {
+          value: start.value,
+          timebase:
+            timebase.id as TranscriptSegment['interval']['start']['timebase'],
+          unit: 'seconds',
+        },
+        end: {
+          value: end.value,
+          timebase:
+            timebase.id as TranscriptSegment['interval']['end']['timebase'],
+          unit: 'seconds',
+        },
+      },
+      speakerId: segment.speakerId as string | null,
+      words: [],
+      confidence:
+        typeof segment.confidence === 'number' &&
+        Number.isFinite(segment.confidence) &&
+        segment.confidence >= 0 &&
+        segment.confidence <= 1
+          ? segment.confidence
+          : null,
+    };
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function ocrLineRegion(line: OCRLine, space: ImageSpace): OriginalTextRegion {
+  const bounds = line.boundingBox;
+  const left = Math.max(
+    0,
+    Math.min(space.dimensions.width - 1, Math.floor(bounds.x)),
+  );
+  const top = Math.max(
+    0,
+    Math.min(space.dimensions.height - 1, Math.floor(bounds.y)),
+  );
+  const maskSpace = createMaskSpace(
+    `ocr-line-mask:${line.id}`,
+    space,
+    space.dimensions.width,
+    space.dimensions.height,
+  );
+  const points = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+    { x: bounds.x, y: bounds.y + bounds.height },
+  ].map((point) => ({ ...point, coordinateSpace: space }));
+  return {
+    id: `text:${line.id}`,
+    mask: {
+      width: 1,
+      height: 1,
+      runs: [{ x: 0, y: 0, length: 1 }],
+      origin: { x: left, y: top, coordinateSpace: maskSpace },
+      coordinateSpace: maskSpace,
+    },
+    polygon: { points, coordinateSpace: space },
+    boundingBox: { ...bounds, coordinateSpace: space },
+    confidence: line.confidence,
+    coordinateSpace: space,
+  };
+}
+
+function automationFontMetrics(): CaptionFontMetrics {
+  const glyphAdvances: Record<string, number> = {};
+  for (const character of 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') {
+    glyphAdvances[character] = 'MW@%&'.includes(character)
+      ? 850
+      : 'ilIftjr'.includes(character)
+        ? 330
+        : 'mw'.includes(character)
+          ? 760
+          : 'ABCDEFGHKNOPQRSTUVXYZ'.includes(character)
+            ? 680
+            : 550;
+  }
+  for (const character of " .,;:!|'`") glyphAdvances[character] = 280;
+  for (const character of '-_()[]{}') glyphAdvances[character] = 420;
+  for (const character of '?*+=/') glyphAdvances[character] = 560;
+  return {
+    family: 'Arial',
+    unitsPerEm: 1000,
+    ascent: 750,
+    descent: 250,
+    fallbackAdvance: 560,
+    glyphAdvances,
+  };
+}
+
+function importErrorStatus(error: SourceImageImportError): number {
+  switch (error.code) {
+    case 'FILE_TOO_LARGE':
+    case 'IMAGE_TOO_LARGE':
+      return 413;
+    case 'UNSUPPORTED_FORMAT':
+      return 415;
+    case 'CORRUPT_IMAGE':
+      return 422;
+    case 'EMPTY_FILE':
+      return 400;
+  }
+}
+
+async function handleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  state: ApiState,
+) {
+  if (
+    request.method === 'GET' &&
+    Object.hasOwn(paddleModelUrlByRoute, request.url ?? '')
+  ) {
+    const route = request.url as keyof typeof paddleModelUrlByRoute;
+    try {
+      let modelPromise = paddleModelCache.get(route);
+      if (!modelPromise) {
+        modelPromise = fetch(paddleModelUrlByRoute[route]).then(
+          async (upstream) => {
+            if (!upstream.ok)
+              throw new Error(`Paddle model host returned ${upstream.status}.`);
+            const bytes = Buffer.from(await upstream.arrayBuffer());
+            if (bytes.byteLength < 1024 * 1024)
+              throw new Error('The Paddle model download was incomplete.');
+            return bytes;
+          },
+        );
+        paddleModelCache.set(route, modelPromise);
+        void modelPromise.catch(() => paddleModelCache.delete(route));
+      }
+      const bytes = await modelPromise;
+      response.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': bytes.byteLength,
+        'cache-control': 'public, max-age=31536000, immutable',
+        'x-content-type-options': 'nosniff',
+      });
+      response.end(bytes);
+    } catch (error) {
+      sendJson(response, 502, {
+        error: {
+          code: 'OCR_MODEL_UNAVAILABLE',
+          message:
+            error instanceof Error
+              ? `The official PaddleOCR model could not be loaded: ${error.message}`
+              : 'The official PaddleOCR model could not be loaded.',
+        },
+      });
+    }
+    return;
+  }
+  const { sourceImages } = state;
+  if (request.method === 'GET' && request.url === '/health') {
+    sendJson(response, 200, {
+      status: 'ok',
+      service: serviceName,
+      configuration: {
+        geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
+      },
+    });
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/assist') {
+    if (!process.env.GEMINI_API_KEY) {
+      sendJson(response, 503, {
+        error: {
+          code: 'ASSIST_NOT_CONFIGURED',
+          message: 'Server-side Gemini Assist is not configured.',
+        },
+      });
+      return;
+    }
+    try {
+      const value = await readJsonBody(request);
+      if (!isAssistInput(value))
+        throw new RequestError(
+          400,
+          'INVALID_ASSIST_REQUEST',
+          'Provide a supported assistance task, target ID, and context object.',
+        );
+      const abortController = new AbortController();
+      request.once('aborted', () => abortController.abort());
+      const proposal = await new GeminiAssistService(
+        new GeminiAssistProvider(),
+      ).propose(value, abortController.signal);
+      sendJson(response, 200, { proposal });
+    } catch (error) {
+      const status =
+        error instanceof RequestError
+          ? error.statusCode
+          : error instanceof AssistError
+            ? 422
+            : 502;
+      sendJson(response, status, {
+        error: {
+          code:
+            error instanceof RequestError
+              ? error.code
+              : error instanceof AssistError
+                ? 'ASSIST_INVALID'
+                : 'GEMINI_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Gemini Assist failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/transcribe') {
+    if (!process.env.GEMINI_API_KEY) {
+      sendJson(response, 503, {
+        error: {
+          code: 'TRANSCRIPTION_NOT_CONFIGURED',
+          message: 'Gemini transcription is not configured on the API server.',
+        },
+      });
+      return;
+    }
+    try {
+      const { audio, asset } = await readMultipartAudio(request);
+      const controller = new AbortController();
+      request.once('aborted', () => controller.abort());
+      const transcript = await new TranscriptionService(
+        new GeminiTranscriptionProvider(),
+      ).transcribe({
+        asset,
+        bytes: new Uint8Array(
+          audio.bytes.buffer,
+          audio.bytes.byteOffset,
+          audio.bytes.byteLength,
+        ),
+        signal: controller.signal,
+      });
+      sendJson(response, 200, { transcript });
+    } catch (error) {
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof TranscriptionError) {
+        const status =
+          error.code === 'TIMEOUT'
+            ? 504
+            : error.code === 'INVALID_OUTPUT'
+              ? 422
+              : error.code === 'ABORTED'
+                ? 499
+                : 502;
+        sendJson(response, status, {
+          error: {
+            code: error.providerCode ?? error.code,
+            message: error.message,
+          },
+        });
+        return;
+      }
+      if (error instanceof GeminiTranscriptionError) {
+        sendJson(response, 502, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'TRANSCRIPTION_FAILED',
+          message: 'The audio could not be transcribed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/analyze-page') {
+    const original = sourceImages.get('original');
+    const cleaned = sourceImages.get('cleaned');
+    if (!original && !cleaned) {
+      sendJson(response, 409, {
+        error: {
+          code: 'IMAGE_REQUIRED',
+          message: 'Import a comic page before scanning for bubbles.',
+        },
+      });
+      return;
+    }
+    let requestedRole: SourceImageRole = cleaned ? 'cleaned' : 'original';
+    let alignPair = Boolean(original && cleaned);
+    if ((request.headers['content-type'] ?? '').includes('application/json')) {
+      const options = asRecord(await readJsonBody(request, 16 * 1024));
+      if (options.role === 'original' || options.role === 'cleaned')
+        requestedRole = options.role;
+      if (typeof options.alignPair === 'boolean') alignPair = options.alignPair;
+    }
+    if (alignPair && (!original || !cleaned)) {
+      sendJson(response, 409, {
+        error: {
+          code: 'IMAGE_PAIR_REQUIRED',
+          message: 'The requested aligned scan needs both comic pages.',
+        },
+      });
+      return;
+    }
+    if (alignPair && !state.alignment) {
+      sendJson(response, 409, {
+        error: {
+          code: 'ALIGNMENT_REQUIRED',
+          message: 'Align the original and cleaned pages before scanning.',
+        },
+      });
+      return;
+    }
+    try {
+      const detectFrom = alignPair
+        ? cleaned!
+        : (sourceImages.get(requestedRole) ?? cleaned ?? original!);
+      const coordinateSpace =
+        alignPair && state.alignment
+          ? state.alignment.targetSpace
+          : createImageSpace(
+              `image:${detectFrom.metadata.id}`,
+              detectFrom.metadata.dimensions.width,
+              detectFrom.metadata.dimensions.height,
+            );
+      const imageBytes =
+        alignPair && state.alignment
+          ? await renderAlignedCleanedImage(
+              cleaned!.getBytes(),
+              state.alignment!,
+              Math.max(
+                coordinateSpace.dimensions.width,
+                coordinateSpace.dimensions.height,
+              ),
+            )
+          : detectFrom.getBytes();
+      const detection = await bubbleDetectionEngine.detect(
+        imageBytes,
+        coordinateSpace,
+      );
+      sendJson(response, 200, {
+        coordinateSpace,
+        bubbles: detection.bubbles.map(
+          ({
+            id,
+            kind,
+            polygon,
+            confidence,
+            classificationConfidence,
+            shape,
+            tail,
+          }) => ({
+            id,
+            kind,
+            shape,
+            polygon,
+            confidence,
+            classificationConfidence,
+            tail: tail?.points ?? null,
+          }),
+        ),
+        ocr: { coordinateSpace, blocks: [] },
+      });
+    } catch (error) {
+      sendJson(response, 422, {
+        error: {
+          code: 'PAGE_ANALYSIS_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Page analysis failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/ocr') {
+    try {
+      const value = await readJsonBody(request, 8 * 1024 * 1024);
+      const scanRequest = parseOCRScanRequest(value);
+      const sourceImage = sourceImages.get(scanRequest.role);
+      if (!sourceImage) {
+        sendJson(response, 409, {
+          error: {
+            code: 'OCR_IMAGE_REQUIRED',
+            message: `Import the ${scanRequest.role} comic page before running OCR.`,
+          },
+        });
+        return;
+      }
+      if (sourceImage.metadata.sha256 !== scanRequest.sourceHash) {
+        sendJson(response, 409, {
+          error: {
+            code: 'OCR_SOURCE_CHANGED',
+            message:
+              'The active page changed before OCR began. Retry on the current page.',
+          },
+        });
+        return;
+      }
+      if (
+        scanRequest.coordinateSpaceId !== `workspace:${sourceImage.metadata.id}`
+      ) {
+        sendJson(response, 400, {
+          error: {
+            code: 'INVALID_OCR_COORDINATE_SPACE',
+            message:
+              'OCR geometry must use the active source page coordinate space.',
+          },
+        });
+        return;
+      }
+      const result = await scanWithLocalOCR(
+        sourceImage.getBytes(),
+        sourceImage.metadata,
+        {
+          enhanced: scanRequest.enhanced,
+          coordinateSpaceId: scanRequest.coordinateSpaceId,
+          bubbles: scanRequest.bubbles,
+        },
+      );
+      if (request.aborted || response.destroyed) return;
+      const expectedSpace = createImageSpace(
+        scanRequest.coordinateSpaceId,
+        sourceImage.metadata.dimensions.width,
+        sourceImage.metadata.dimensions.height,
+      );
+      const document = parseOCRDocument(
+        result.document,
+        expectedSpace,
+        result.document.provenance,
+      );
+      sendJson(response, 200, { ...result, document });
+    } catch (error) {
+      if (request.aborted || response.destroyed) return;
+      const status = error instanceof RequestError ? error.statusCode : 422;
+      sendJson(response, status, {
+        error: {
+          code: error instanceof RequestError ? error.code : 'LOCAL_OCR_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Local OCR could not complete this page. Retry recognition.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/automate-speech') {
+    const original = sourceImages.get('original');
+    const cleaned = sourceImages.get('cleaned');
+    if (!original || !cleaned || !state.alignment) {
+      sendJson(response, 409, {
+        error: {
+          code: 'PAGE_NOT_READY',
+          message:
+            'Import and align both comic pages before automating speech.',
+        },
+      });
+      return;
+    }
+    try {
+      const requestValue = await readJsonBody(request, 8 * 1024 * 1024);
+      const requestRecord = asRecord(requestValue);
+      const transcriptValue = requestRecord.transcript;
+      const transcriptSegments = parseAutomationSegments(transcriptValue);
+      const pageSpace = state.alignment.targetSpace;
+      const suppliedOCR = requestRecord.ocr;
+      const ocr = suppliedOCR
+        ? parseOCRDocument(suppliedOCR, pageSpace, {
+            source: '@paddleocr/paddleocr-js',
+            version: '0.4.2 / PP-OCRv5 en',
+            inputHashes: [original.metadata.sha256],
+          })
+        : null;
+      const alignedCleaned = await renderAlignedCleanedImage(
+        cleaned.getBytes(),
+        state.alignment,
+        Math.max(pageSpace.dimensions.width, pageSpace.dimensions.height),
+      );
+      const detection = await bubbleDetectionEngine.detect(
+        alignedCleaned,
+        pageSpace,
+      );
+      const originalTextRegions = (ocr?.blocks ?? []).flatMap((block) =>
+        block.lines.map((line) => ocrLineRegion(line, pageSpace)),
+      );
+      const associations = ocr
+        ? await bubbleAssociationEngine.associate({
+            bubbles: detection.bubbles,
+            originalTextRegions,
+            ocrDocument: ocr,
+            coordinateSpace: pageSpace,
+          })
+        : { references: [] };
+      const ocrWarning = ocr
+        ? null
+        : 'Run local PaddleOCR first; bubble detection and manual matching are available without OCR.';
+      const referenceByBubble = new Map(
+        associations.references.map((reference) => [
+          reference.bubbleId,
+          reference,
+        ]),
+      );
+      // Keep every detected bubble reviewable even when OCR or spatial association misses its lettering.
+      const references: BubbleDialogueReference[] = detection.bubbles.map(
+        (bubble) =>
+          referenceByBubble.get(
+            bubble.id as BubbleDialogueReference['bubbleId'],
+          ) ?? {
+            id: `reference:${bubble.id}`,
+            bubbleId: bubble.id as BubbleDialogueReference['bubbleId'],
+            textRegionIds: [],
+            originalText: '',
+            originalTextBounds: bubble.boundingBox,
+            lineCount: 0,
+            alignment: 'center',
+            confidence: 0.1,
+            status: 'pending-review',
+            method: 'spatial',
+            revision: 1,
+          },
+      );
+      const bubbleById = new Map(
+        detection.bubbles.map((bubble) => [bubble.id, bubble]),
+      );
+      const readingOrder = [...references]
+        .sort((left, right) => {
+          const a = bubbleById.get(left.bubbleId);
+          const b = bubbleById.get(right.bubbleId);
+          if (!a || !b) return 0;
+          const verticalTolerance =
+            Math.min(a.boundingBox.height, b.boundingBox.height) * 0.5;
+          return Math.abs(a.boundingBox.y - b.boundingBox.y) > verticalTolerance
+            ? a.boundingBox.y - b.boundingBox.y
+            : a.boundingBox.x - b.boundingBox.x;
+        })
+        .map((reference) => reference.bubbleId);
+      const mappingResult = new DialogueMappingEngine().map({
+        bubbleReferences: references,
+        readingOrder,
+        transcriptSegments,
+      });
+      const font = automationFontMetrics();
+      const matches = await Promise.all(
+        mappingResult.mappings.map(async (mapping) => {
+          const segment = transcriptSegments.find(
+            (item) => item.id === mapping.transcriptSegmentId,
+          )!;
+          const candidateBubbleIds = mapping.alternatives.map(
+            (candidate) => candidate.bubbleId,
+          );
+          const candidateLayouts = await Promise.all(
+            candidateBubbleIds.map(async (bubbleId) => {
+              const reference = references.find(
+                (item) => item.bubbleId === bubbleId,
+              );
+              const bubble = detection.bubbles.find(
+                (item) => item.id === bubbleId,
+              );
+              if (!reference || !bubble)
+                return {
+                  bubbleId,
+                  layout: null,
+                  fitError: 'Bubble geometry or text reference is unavailable.',
+                };
+              try {
+                const safeRegion = await safeRegionEngine.compute({
+                  bubble,
+                  originalTextBounds: reference.originalTextBounds,
+                  pageImage: original.getBytes(),
+                  coordinateSpace: pageSpace,
+                  internalPaddingPx: 6,
+                });
+                const layout = captionFittingEngine.fit({
+                  caption: segment.text,
+                  font,
+                  fontSizeRange: { minPx: 12, maxPx: 36 },
+                  safeRegion: safeRegion.region,
+                  paddingPx: 1,
+                  alignment:
+                    reference.alignment === 'unknown'
+                      ? 'center'
+                      : reference.alignment,
+                  lineSpacingPx: 2,
+                });
+                return { bubbleId, layout, fitError: null };
+              } catch (error) {
+                return {
+                  bubbleId,
+                  layout: null,
+                  fitError:
+                    error instanceof Error
+                      ? error.message
+                      : 'Caption did not fit the safe region.',
+                };
+              }
+            }),
+          );
+          const selected = candidateLayouts.find(
+            (candidate) => candidate.bubbleId === mapping.bubbleId,
+          );
+          return {
+            mapping,
+            segmentId: segment.id,
+            layout: selected?.layout ?? null,
+            fitError:
+              selected?.fitError ??
+              (mapping.bubbleId
+                ? 'No caption layout was produced.'
+                : 'Choose a reviewed bubble candidate to fit this caption.'),
+            candidateLayouts,
+          };
+        }),
+      );
+      sendJson(response, 200, {
+        coordinateSpace: pageSpace,
+        bubbles: detection.bubbles.map(
+          ({ id, kind, polygon, confidence, tail }) => ({
+            id,
+            kind,
+            polygon,
+            confidence,
+            tail: tail?.points ?? null,
+          }),
+        ),
+        ocr: {
+          coordinateSpace: pageSpace,
+          blocks:
+            ocr?.blocks.map((block) => ({
+              lines: block.lines.map(
+                ({ id, text, confidence, boundingBox }) => ({
+                  id,
+                  text,
+                  confidence,
+                  boundingBox,
+                }),
+              ),
+            })) ?? [],
+        },
+        ocrWarning,
+        matches,
+        unmappedTranscriptSegmentIds:
+          mappingResult.unmappedTranscriptSegmentIds,
+      });
+    } catch (error) {
+      const status = error instanceof RequestError ? error.statusCode : 422;
+      sendJson(response, status, {
+        error: {
+          code:
+            error instanceof RequestError
+              ? error.code
+              : 'SPEECH_AUTOMATION_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Speech automation failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'GET' && request.url === '/api/images') {
+    sendJson(response, 200, currentPair(sourceImages));
+    return;
+  }
+
+  if (request.method === 'GET' && request.url === '/api/alignment') {
+    if (!state.alignment) {
+      sendJson(response, 404, {
+        error: {
+          code: 'ALIGNMENT_NOT_FOUND',
+          message: 'Align the imported images first.',
+        },
+      });
+      return;
+    }
+    sendJson(response, 200, state.alignment);
+    return;
+  }
+
+  const visualizationRoute = request.url?.match(
+    /^\/api\/alignment\/visualization\/(overlay|difference)$/,
+  );
+  if (request.method === 'GET' && visualizationRoute) {
+    if (!state.alignment) {
+      sendJson(response, 404, {
+        error: {
+          code: 'ALIGNMENT_NOT_FOUND',
+          message: 'Align the imported images first.',
+        },
+      });
+      return;
+    }
+    const original = sourceImages.get('original');
+    const cleaned = sourceImages.get('cleaned');
+    if (!original || !cleaned) {
+      sendJson(response, 409, {
+        error: {
+          code: 'IMAGE_PAIR_REQUIRED',
+          message: 'Import both images before alignment.',
+        },
+      });
+      return;
+    }
+    if (!state.visualizations) {
+      state.visualizations = await renderAlignmentVisualizations(
+        original.getBytes(),
+        cleaned.getBytes(),
+        state.alignment,
+      );
+    }
+    const visualizations = state.visualizations;
+    const bytes =
+      visualizationRoute[1] === 'overlay'
+        ? visualizations.overlayPng
+        : visualizations.differencePng;
+    response.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': bytes.byteLength,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    response.end(bytes);
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/text-differences') {
+    const original = sourceImages.get('original');
+    const cleaned = sourceImages.get('cleaned');
+    if (!original || !cleaned) {
+      sendJson(response, 409, {
+        error: {
+          code: 'IMAGE_PAIR_REQUIRED',
+          message: 'Import both images before detecting removed text.',
+        },
+      });
+      return;
+    }
+    if (!state.alignment) {
+      sendJson(response, 409, {
+        error: {
+          code: 'ALIGNMENT_REQUIRED',
+          message: 'Align the images before detecting removed text.',
+        },
+      });
+      return;
+    }
+    try {
+      const alignedCleaned = await renderAlignedCleanedImage(
+        cleaned.getBytes(),
+        state.alignment,
+      );
+      state.textDifferences = await textDifferenceEngine.detect(
+        original.getBytes(),
+        alignedCleaned,
+        state.alignment.targetSpace,
+      );
+      sendJson(response, 200, {
+        regions: state.textDifferences.regions,
+        maskSpace: state.textDifferences.maskSpace,
+      });
+    } catch (error) {
+      sendJson(response, 422, {
+        error: {
+          code: 'TEXT_DIFFERENCE_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Removed text could not be detected.',
+        },
+      });
+    }
+    return;
+  }
+
+  const textVisualizationRoute = request.url?.match(
+    /^\/api\/text-differences\/(debug|difference)$/,
+  );
+  if (request.method === 'GET' && textVisualizationRoute) {
+    if (!state.textDifferences) {
+      sendJson(response, 404, {
+        error: {
+          code: 'TEXT_DIFFERENCES_NOT_FOUND',
+          message: 'Run text difference detection first.',
+        },
+      });
+      return;
+    }
+    const bytes =
+      textVisualizationRoute[1] === 'debug'
+        ? state.textDifferences.debugPng
+        : state.textDifferences.differencePng;
+    response.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': bytes.byteLength,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    response.end(bytes);
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/alignment') {
+    const original = sourceImages.get('original');
+    const cleaned = sourceImages.get('cleaned');
+    if (!original || !cleaned) {
+      sendJson(response, 409, {
+        error: {
+          code: 'IMAGE_PAIR_REQUIRED',
+          message: 'Import both original and cleaned images before alignment.',
+        },
+      });
+      return;
+    }
+    try {
+      state.alignment = await alignmentEngine.align(original, cleaned);
+      state.visualizations = null;
+      state.textDifferences = null;
+      sendJson(response, 200, state.alignment);
+    } catch (error) {
+      sendJson(response, 422, {
+        error: {
+          code:
+            error instanceof AlignmentError
+              ? 'ALIGNMENT_FAILED'
+              : 'ALIGNMENT_ERROR',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'The images could not be aligned.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'PUT' && request.url === '/api/alignment/manual') {
+    if (!state.alignment) {
+      sendJson(response, 404, {
+        error: {
+          code: 'ALIGNMENT_NOT_FOUND',
+          message: 'Estimate alignment before applying a manual correction.',
+        },
+      });
+      return;
+    }
+    try {
+      const value = await readJsonBody(request);
+      if (!isManualAlignment(value))
+        throw new RequestError(
+          400,
+          'INVALID_ALIGNMENT',
+          'Provide numeric scale, rotation, translationX, and translationY values.',
+        );
+      state.alignment = applyManualAlignment(state.alignment, value);
+      state.visualizations = null;
+      state.textDifferences = null;
+      sendJson(response, 200, state.alignment);
+    } catch (error) {
+      const status = error instanceof RequestError ? error.statusCode : 422;
+      sendJson(response, status, {
+        error: {
+          code:
+            error instanceof RequestError ? error.code : 'INVALID_ALIGNMENT',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'The manual alignment is invalid.',
+        },
+      });
+    }
+    return;
+  }
+
+  const contentRoute = request.url?.match(
+    /^\/api\/images\/(original|cleaned)\/content$/,
+  );
+  if (request.method === 'GET' && contentRoute) {
+    const sourceImage = sourceImages.get(contentRoute[1] as SourceImageRole);
+    if (!sourceImage) {
+      sendJson(response, 404, {
+        error: {
+          code: 'IMAGE_NOT_FOUND',
+          message: 'No image has been imported for this role.',
+        },
+      });
+      return;
+    }
+    const bytes = sourceImage.getBytes();
+    response.writeHead(200, {
+      'content-type': sourceImage.metadata.mediaType,
+      'content-length': bytes.byteLength,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    response.end(bytes);
+    return;
+  }
+
+  const imageRoute = request.url?.match(/^\/api\/images\/(original|cleaned)$/);
+  if (request.method === 'POST' && imageRoute) {
+    try {
+      const role = imageRoute[1] as SourceImageRole;
+      const upload = await readMultipartImage(request);
+      const sourceImage = await ImmutableSourceImage.import({
+        role,
+        filename: upload.filename,
+        bytes: upload.bytes,
+      });
+      sourceImages.set(role, sourceImage);
+      state.alignment = null;
+      state.visualizations = null;
+      state.textDifferences = null;
+      sendJson(response, 201, {
+        image: sourceImage.metadata,
+        pair: currentPair(sourceImages),
+      });
+    } catch (error) {
+      if (error instanceof SourceImageImportError) {
+        sendJson(response, importErrorStatus(error), {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'IMPORT_FAILED',
+          message: 'The image could not be imported.',
+        },
+      });
+    }
+    return;
+  }
+
+  sendJson(response, 404, { error: 'Not found' });
+}
+
+export function createApiServer(): Server {
+  const state: ApiState = {
+    sourceImages: new Map(),
+    alignment: null,
+    visualizations: null,
+    textDifferences: null,
+  };
+  return createServer((request, response) => {
+    void handleRequest(request, response, state);
+  });
+}
+
+function parseOCRScanRequest(value: unknown): {
+  readonly role: SourceImageRole;
+  readonly sourceHash: string;
+  readonly coordinateSpaceId: string;
+  readonly enhanced: boolean;
+  readonly bubbles: readonly OCRBubbleInput[];
+} {
+  const candidate = asRecord(value);
+  if (
+    (candidate.role !== 'original' && candidate.role !== 'cleaned') ||
+    typeof candidate.sourceHash !== 'string' ||
+    !/^[a-f\d]{64}$/i.test(candidate.sourceHash) ||
+    typeof candidate.coordinateSpaceId !== 'string' ||
+    candidate.coordinateSpaceId.length < 1 ||
+    candidate.coordinateSpaceId.length > 180 ||
+    typeof candidate.enhanced !== 'boolean' ||
+    (candidate.bubbles !== undefined && !Array.isArray(candidate.bubbles))
+  ) {
+    throw new RequestError(
+      400,
+      'INVALID_OCR_REQUEST',
+      'Provide a source page, source hash, preprocessing mode, and optional bubble crop regions.',
+    );
+  }
+  const values = (candidate.bubbles ?? []) as unknown[];
+  if (values.length > 128) {
+    throw new RequestError(
+      413,
+      'TOO_MANY_OCR_CROPS',
+      'OCR can process at most 128 bubble regions at a time.',
+    );
+  }
+  const bubbles = values.map((value, index) => {
+    const region = asRecord(value);
+    const points = region.polygon;
+    if (
+      typeof region.id !== 'string' ||
+      region.id.length < 1 ||
+      region.id.length > 128 ||
+      !Array.isArray(points) ||
+      points.length < 3 ||
+      points.length > 256 ||
+      points.some((value) => {
+        const point = asRecord(value);
+        return (
+          typeof point.x !== 'number' ||
+          !Number.isFinite(point.x) ||
+          typeof point.y !== 'number' ||
+          !Number.isFinite(point.y)
+        );
+      }) ||
+      (region.cropPadding !== undefined &&
+        (typeof region.cropPadding !== 'number' ||
+          !Number.isFinite(region.cropPadding) ||
+          region.cropPadding < 0.02 ||
+          region.cropPadding > 0.24))
+    ) {
+      throw new RequestError(
+        400,
+        'INVALID_OCR_CROP',
+        `Bubble crop ${index + 1} has invalid image geometry.`,
+      );
+    }
+    const allowedReviewStatuses = [
+      'pending-review',
+      'accepted',
+      'edited',
+      'rejected',
+    ];
+    if (
+      region.reviewStatus !== undefined &&
+      (typeof region.reviewStatus !== 'string' ||
+        !allowedReviewStatuses.includes(region.reviewStatus))
+    ) {
+      throw new RequestError(
+        400,
+        'INVALID_OCR_CROP',
+        `Bubble crop ${index + 1} has an invalid review status.`,
+      );
+    }
+    return {
+      id: region.id,
+      polygon: points as OCRBubbleInput['polygon'],
+      ...(region.reviewStatus ? { reviewStatus: region.reviewStatus } : {}),
+      ...(region.cropPadding !== undefined
+        ? { cropPadding: region.cropPadding as number }
+        : {}),
+    };
+  });
+  return {
+    role: candidate.role,
+    sourceHash: candidate.sourceHash,
+    coordinateSpaceId: candidate.coordinateSpaceId,
+    enhanced: candidate.enhanced,
+    bubbles,
+  };
+}
+
+function isManualAlignment(value: unknown): value is {
+  readonly scale: number;
+  readonly rotation: number;
+  readonly translationX: number;
+  readonly translationY: number;
+} {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return ['scale', 'rotation', 'translationX', 'translationY'].every(
+    (key) =>
+      typeof candidate[key] === 'number' && Number.isFinite(candidate[key]),
+  );
+}
+
+function isAssistInput(value: unknown): value is AssistInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const tasks = [
+    'ocr-correction',
+    'bubble-classification',
+    'dialogue-mapping',
+    'speaker-context',
+    'transcription-correction',
+  ];
+  return (
+    tasks.includes(String(candidate.task)) &&
+    typeof candidate.targetId === 'string' &&
+    candidate.targetId.length > 0 &&
+    candidate.context !== null &&
+    typeof candidate.context === 'object' &&
+    !Array.isArray(candidate.context)
+  );
+}
+
+export function startApiServer(port = Number(process.env.API_PORT ?? 3039)) {
+  const server = createApiServer();
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `API port ${port} is already in use. Set API_PORT to an available port and restart both servers.\n`,
+      );
+      return;
+    }
+    process.stderr.write(`API server failed: ${error.message}\n`);
+  });
+  server.listen(port, '127.0.0.1', () => {
+    const address = server.address();
+    const boundPort =
+      typeof address === 'object' && address ? address.port : port;
+    process.stdout.write(
+      `${serviceName} listening on http://localhost:${boundPort}\n`,
+    );
+  });
+  return server;
+}

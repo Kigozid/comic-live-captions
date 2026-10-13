@@ -1,0 +1,29 @@
+{
+  "name": "@comic-captioner/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "corepack pnpm --filter @comic-captioner/image-engine --filter @comic-captioner/bubble-engine --filter @comic-captioner/caption-engine --filter @comic-captioner/audio-engine --filter @comic-captioner/ai build && node --import tsx/esm src/dev.ts",
+    "build": "tsup src/server.ts src/dev.ts --format esm --platform node --target node20 --out-dir dist --clean",
+    "start": "node dist/dev.js",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@comic-captioner/core": "workspace:*",
+    "@comic-captioner/ai": "workspace:*",
+    "@comic-captioner/audio-engine": "workspace:*",
+    "@comic-captioner/bubble-engine": "workspace:*",
+    "@comic-captioner/caption-engine": "workspace:*",
+    "@comic-captioner/image-engine": "workspace:*",
+    "@comic-captioner/shared": "workspace:*",
+    "@paddleocr/paddleocr-js": "0.4.2",
+    "sharp": "^0.34.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.6",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

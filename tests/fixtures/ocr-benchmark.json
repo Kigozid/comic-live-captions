@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "provider": "@paddleocr/paddleocr-js 0.4.2 / PP-OCRv5 English",
+  "cases": [
+    {
+      "id": "clear",
+      "fixture": "simple",
+      "expectedText": "HELLO",
+      "category": "clear text"
+    },
+    {
+      "id": "small",
+      "fixture": "simple",
+      "expectedText": "HELLO",
+      "category": "small lettering",
+      "scale": 0.5
+    },
+    {
+      "id": "dark-bubble",
+      "fixture": "simple",
+      "expectedText": "HELLO",
+      "category": "white lettering on dark background",
+      "darkBubble": true
+    },
+    {
+      "id": "irregular",
+      "fixture": "difficult-lettering",
+      "expectedText": "KRAK!!",
+      "category": "irregular lettering"
+    },
+    {
+      "id": "low-contrast",
+      "fixture": "simple",
+      "expectedText": "HELLO",
+      "category": "low-contrast text",
+      "lowContrast": true
+    }
+  ],
+  "measurements": [
+    "character error rate",
+    "word error rate",
+    "empty-result frequency",
+    "preprocess milliseconds",
+    "inference milliseconds",
+    "total milliseconds"
+  ]
+}

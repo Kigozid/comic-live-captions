@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comic-captioner.local/schemas/fixture-ground-truth-v1.json",
+  "title": "Comic Captioner synthetic fixture ground truth",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "description",
+    "dimensions",
+    "coordinateSpace",
+    "sourceFiles",
+    "expected"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "dimensions": { "$ref": "#/$defs/dimensions" },
+    "coordinateSpace": {
+      "type": "object",
+      "required": ["id", "kind", "pixelCenters", "origin", "xAxis", "yAxis"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "const": "image" },
+        "pixelCenters": { "const": "integer" },
+        "origin": { "const": "top-left" },
+        "xAxis": { "const": "right" },
+        "yAxis": { "const": "down" }
+      },
+      "additionalProperties": false
+    },
+    "sourceFiles": {
+      "type": "object",
+      "required": ["original", "cleaned"],
+      "properties": {
+        "original": { "const": "original.png" },
+        "cleaned": { "const": "cleaned.png" }
+      },
+      "additionalProperties": false
+    },
+    "expected": {
+      "type": "object",
+      "required": ["bubbles", "textRegions", "ocr", "dialogueMappings"],
+      "properties": {
+        "bubbles": { "type": "array", "items": { "$ref": "#/$defs/bubble" } },
+        "textRegions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/textRegion" }
+        },
+        "ocr": { "type": "array", "items": { "$ref": "#/$defs/ocr" } },
+        "dialogueMappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mapping" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "dimensions": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } },
+      "additionalProperties": false
+    },
+    "bounds": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "polygon": {
+      "type": "array",
+      "minItems": 3,
+      "items": { "$ref": "#/$defs/point" }
+    },
+    "bubble": {
+      "type": "object",
+      "required": ["id", "kind", "polygon", "boundingBox", "tail", "maskFile"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["speech", "thought", "narration"] },
+        "polygon": { "$ref": "#/$defs/polygon" },
+        "boundingBox": { "$ref": "#/$defs/bounds" },
+        "tail": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/polygon" }]
+        },
+        "maskFile": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "textRegion": {
+      "type": "object",
+      "required": ["id", "bubbleId", "boundingBox", "polygon", "maskFile"],
+      "properties": {
+        "id": { "type": "string" },
+        "bubbleId": { "type": "string" },
+        "boundingBox": { "$ref": "#/$defs/bounds" },
+        "polygon": { "$ref": "#/$defs/polygon" },
+        "maskFile": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "ocr": {
+      "type": "object",
+      "required": [
+        "id",
+        "bubbleId",
+        "text",
+        "confidence",
+        "boundingBox",
+        "coordinateSpaceId"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "bubbleId": { "type": "string" },
+        "text": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "boundingBox": { "$ref": "#/$defs/bounds" },
+        "coordinateSpaceId": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "mapping": {
+      "type": "object",
+      "required": [
+        "id",
+        "transcriptSegmentId",
+        "bubbleId",
+        "confidence",
+        "expectedIntervalSeconds"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "transcriptSegmentId": { "type": "string" },
+        "bubbleId": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "expectedIntervalSeconds": {
+          "type": "object",
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "number", "minimum": 0 },
+            "end": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

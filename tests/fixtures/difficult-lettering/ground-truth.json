@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "id": "difficult-lettering",
+  "description": "Synthetic difficult-lettering comic page pair; generated vector art, not scanned or licensed comic material.",
+  "dimensions": {
+    "width": 640,
+    "height": 480
+  },
+  "coordinateSpace": {
+    "id": "image:page",
+    "kind": "image",
+    "pixelCenters": "integer",
+    "origin": "top-left",
+    "xAxis": "right",
+    "yAxis": "down"
+  },
+  "sourceFiles": {
+    "original": "original.png",
+    "cleaned": "cleaned.png"
+  },
+  "expected": {
+    "bubbles": [
+      {
+        "id": "bubble-1",
+        "kind": "speech",
+        "polygon": [
+          {
+            "x": 580,
+            "y": 235
+          },
+          {
+            "x": 515.89,
+            "y": 268.31
+          },
+          {
+            "x": 545.17,
+            "y": 317.5
+          },
+          {
+            "x": 463.4,
+            "y": 326
+          },
+          {
+            "x": 450,
+            "y": 377.89
+          },
+          {
+            "x": 372.49,
+            "y": 359.31
+          },
+          {
+            "x": 320,
+            "y": 400
+          },
+          {
+            "x": 267.51,
+            "y": 359.31
+          },
+          {
+            "x": 190,
+            "y": 377.89
+          },
+          {
+            "x": 176.6,
+            "y": 326
+          },
+          {
+            "x": 94.83,
+            "y": 317.5
+          },
+          {
+            "x": 124.11,
+            "y": 268.31
+          },
+          {
+            "x": 60,
+            "y": 235
+          },
+          {
+            "x": 124.11,
+            "y": 201.69
+          },
+          {
+            "x": 94.83,
+            "y": 152.5
+          },
+          {
+            "x": 176.6,
+            "y": 144
+          },
+          {
+            "x": 190,
+            "y": 92.11
+          },
+          {
+            "x": 267.51,
+            "y": 110.69
+          },
+          {
+            "x": 320,
+            "y": 70
+          },
+          {
+            "x": 372.49,
+            "y": 110.69
+          },
+          {
+            "x": 450,
+            "y": 92.11
+          },
+          {
+            "x": 463.4,
+            "y": 144
+          },
+          {
+            "x": 545.17,
+            "y": 152.5
+          },
+          {
+            "x": 515.89,
+            "y": 201.69
+          }
+        ],
+        "boundingBox": {
+          "x": 60,
+          "y": 70,
+          "width": 520,
+          "height": 330
+        },
+        "tail": null,
+        "maskFile": "expected/bubble-1-mask.png"
+      }
+    ],
+    "textRegions": [
+      {
+        "id": "text-bubble-1",
+        "bubbleId": "bubble-1",
+        "boundingBox": {
+          "x": 250.7,
+          "y": 203.65,
+          "width": 138.6,
+          "height": 62.7
+        },
+        "polygon": [
+          {
+            "x": 250.7,
+            "y": 203.65
+          },
+          {
+            "x": 389.29999999999995,
+            "y": 203.65
+          },
+          {
+            "x": 389.29999999999995,
+            "y": 266.35
+          },
+          {
+            "x": 250.7,
+            "y": 266.35
+          }
+        ],
+        "maskFile": "expected/bubble-1-text-mask.png"
+      }
+    ],
+    "ocr": [
+      {
+        "id": "ocr-bubble-1",
+        "bubbleId": "bubble-1",
+        "text": "KRAK!!",
+        "confidence": 1,
+        "boundingBox": {
+          "x": 250.7,
+          "y": 203.65,
+          "width": 138.6,
+          "height": 62.7
+        },
+        "coordinateSpaceId": "image:page"
+      }
+    ],
+    "dialogueMappings": [
+      {
+        "id": "mapping-bubble-1",
+        "transcriptSegmentId": "segment-bubble-1",
+        "bubbleId": "bubble-1",
+        "confidence": 1,
+        "expectedIntervalSeconds": {
+          "start": 0.05,
+          "end": 0.55
+        }
+      }
+    ]
+  }
+}
