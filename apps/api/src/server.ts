@@ -565,6 +565,7 @@ function mapDetectedBubble(bubble: {
   readonly id: string;
   readonly kind: string;
   readonly polygon: { readonly points: readonly unknown[] };
+  readonly contour?: { readonly points: readonly unknown[] };
   readonly confidence: number;
   readonly classificationConfidence?: number;
   readonly shape: string;
@@ -575,6 +576,7 @@ function mapDetectedBubble(bubble: {
     kind: bubble.kind,
     shape: bubble.shape,
     polygon: bubble.polygon,
+    contour: bubble.contour ?? bubble.polygon,
     confidence: bubble.confidence,
     classificationConfidence: bubble.classificationConfidence,
     tail: bubble.tail?.points ?? null,

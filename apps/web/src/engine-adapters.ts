@@ -159,6 +159,51 @@ export interface HybridDetectResult {
 }
 
 /**
+ * API detect-bubbles returns flattened bubble fields + sources/support/quality.
+ * Normalize to the nested `HybridBubble` shape (`bubble` + provenance).
+ */
+function normalizeApiHybridBubble(raw: unknown): HybridBubble {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  if (record.bubble && typeof record.bubble === 'object') {
+    return record as unknown as HybridBubble;
+  }
+  const polygon = record.polygon as HybridBubble['bubble']['polygon'];
+  const contour =
+    (record.contour as HybridBubble['bubble']['contour'] | undefined) ??
+    polygon;
+  const bubble = {
+    id: String(record.id ?? ''),
+    kind: (record.kind ?? 'unknown') as HybridBubble['bubble']['kind'],
+    shape: (record.shape ?? 'unknown') as HybridBubble['bubble']['shape'],
+    contour,
+    polygon,
+    confidence: Number(record.confidence ?? 0),
+    ...(record.classificationConfidence !== undefined
+      ? {
+          classificationConfidence: Number(record.classificationConfidence),
+        }
+      : {}),
+    tail: (record.tail ?? null) as HybridBubble['bubble']['tail'],
+  };
+  const quality = (record.quality ?? {
+    areaRatio: 0,
+    fillRatio: 0,
+    interiorLuminance: 0,
+    boundaryContrast: 0,
+    edgeContactRatio: 0,
+    score: 0,
+  }) as HybridBubble['quality'];
+  return {
+    bubble: bubble as HybridBubble['bubble'],
+    sources: ((record.sources as string[] | undefined) ?? [
+      'detected',
+    ]) as HybridBubble['sources'],
+    support: (record.support ?? []) as HybridBubble['support'],
+    quality,
+  };
+}
+
+/**
  * Hybrid bubble detection: proposals boost recall (ML preferred, heuristic
  * fallback), deterministic geometry refines and scores every contour.
  *
@@ -191,23 +236,29 @@ export async function detectBubblesHybrid(
       });
       if (response.ok) {
         const payload = (await response.json()) as {
-          bubbles: readonly HybridBubble[];
+          bubbles: readonly unknown[];
           detection: {
             mode: string;
             provider: string | null;
             proposalCount?: number;
+            deterministicCount?: number;
+            mergedCount?: number;
+            refinedCount?: number;
+            rejectedCount?: number;
           };
         };
+        const bubbles = payload.bubbles.map(normalizeApiHybridBubble);
         return {
-          bubbles: payload.bubbles,
+          bubbles,
           result: {
-            bubbles: payload.bubbles,
+            bubbles,
             coordinateSpace: space,
-            deterministicCount: payload.bubbles.length,
+            deterministicCount:
+              payload.detection.deterministicCount ?? bubbles.length,
             proposalCount: payload.detection.proposalCount ?? 0,
-            mergedCount: 0,
-            refinedCount: 0,
-            rejectedCount: 0,
+            mergedCount: payload.detection.mergedCount ?? 0,
+            refinedCount: payload.detection.refinedCount ?? 0,
+            rejectedCount: payload.detection.rejectedCount ?? 0,
             providerName: payload.detection.provider,
           },
           source: 'api',
