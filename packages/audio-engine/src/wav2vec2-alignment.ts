@@ -293,7 +293,6 @@ export function viterbiAlign(
   const S = states.length;
 
   // DP tables: best log-prob and backpointer per (frame, state).
-  const scores = new Float64Array(S).fill(Number.NEGATIVE_INFINITY);
   const back = new Int32Array(numFrames * S).fill(-1);
   const prev = new Float64Array(S).fill(Number.NEGATIVE_INFINITY);
   const current = new Float64Array(S).fill(Number.NEGATIVE_INFINITY);

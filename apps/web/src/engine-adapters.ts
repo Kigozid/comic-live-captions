@@ -8,11 +8,7 @@
 
 import type {
   OCRDocument,
-  OCRWord,
-  OCRLine,
-  OCRBlock,
   ImageSpace,
-  Polygon,
   Bounds,
 } from '@comic-captioner/shared';
 import {
@@ -62,7 +58,7 @@ import {
   type CtcFramePosteriorsProvider,
   type ForcedAlignAcousticResult,
 } from '../../../packages/audio-engine/src/wav2vec2-alignment.js';
-import type { WordTimestamp } from '@comic-captioner/core';
+import type { Transcript, WordTimestamp } from '@comic-captioner/core';
 import type {
   BubbleId,
   PageId,
@@ -463,8 +459,11 @@ export interface AcousticAlignInput {
     readonly end: number;
     readonly speakerId?: string | null;
   }[];
-  readonly pcm: Float32Array;
+  /** Decoded mono PCM. Required for the local provider path. */
+  readonly pcm?: Float32Array;
   readonly sampleRateHz: number;
+  /** Compressed audio bytes; the API decodes these with FFmpeg. */
+  readonly audioBytes?: Uint8Array;
   readonly timebaseId: AudioTimebaseId;
   /**
    * Optional custom wav2vec2/CTC backend. When omitted, this function calls
@@ -494,31 +493,39 @@ export interface AcousticAlignResult {
 export async function refineWordTimesAcoustic(
   input: AcousticAlignInput,
 ): Promise<AcousticAlignResult> {
+  const segmentPayload = input.segments.map((segment) => ({
+    ...(segment.id ? { id: segment.id } : {}),
+    text: segment.text,
+    start: segment.start,
+    end: segment.end,
+    ...(segment.speakerId !== undefined
+      ? { speakerId: segment.speakerId }
+      : {}),
+  }));
+
   // 1) Server-side wav2vec2 (real ONNX weights).
   if (!input.provider && !input.offline) {
     try {
-      const pcmBuffer = input.pcm.buffer.slice(
-        input.pcm.byteOffset,
-        input.pcm.byteOffset + input.pcm.byteLength,
-      );
-      const pcmBase64 = bufferToBase64(new Uint8Array(pcmBuffer));
+      const body: Record<string, unknown> = {
+        sampleRateHz: input.sampleRateHz,
+        timebaseId: input.timebaseId,
+        segments: segmentPayload,
+      };
+      if (input.audioBytes && input.audioBytes.length > 0) {
+        body.audio = bufferToBase64(input.audioBytes);
+      } else if (input.pcm && input.pcm.length > 0) {
+        const pcmBuffer = input.pcm.buffer.slice(
+          input.pcm.byteOffset,
+          input.pcm.byteOffset + input.pcm.byteLength,
+        );
+        body.pcm = bufferToBase64(new Uint8Array(pcmBuffer));
+      } else {
+        throw new Error('acoustic alignment needs pcm or audioBytes');
+      }
       const response = await fetch('/api/align-words', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          pcm: pcmBase64,
-          sampleRateHz: input.sampleRateHz,
-          timebaseId: input.timebaseId,
-          segments: input.segments.map((segment) => ({
-            ...(segment.id ? { id: segment.id } : {}),
-            text: segment.text,
-            start: segment.start,
-            end: segment.end,
-            ...(segment.speakerId !== undefined
-              ? { speakerId: segment.speakerId }
-              : {}),
-          })),
-        }),
+        body: JSON.stringify(body),
       });
       if (response.ok) {
         const payload = (await response.json()) as {
@@ -540,7 +547,12 @@ export async function refineWordTimesAcoustic(
     }
   }
 
-  // 2) Injected provider or synthetic fallback.
+  // 2) Injected provider or synthetic fallback (needs decoded PCM).
+  if (!input.pcm || input.pcm.length === 0) {
+    throw new Error(
+      'Local acoustic alignment requires decoded PCM; provide pcm or use the API path.',
+    );
+  }
   const provider = input.provider ?? new SyntheticCtcPosteriorsProvider();
   const result: ForcedAlignAcousticResult = await alignWordsAcoustic({
     segments: input.segments.map((segment) => ({
@@ -574,6 +586,100 @@ export async function refineWordTimesAcoustic(
     provider: result.provider,
     source: 'local',
   };
+}
+
+export interface TranscriptRefineResult {
+  readonly transcript: Transcript;
+  readonly alignment: AcousticAlignResult | null;
+  readonly message?: string;
+}
+
+/**
+ * Replace transcript segment word timings with CTC Viterbi acoustic alignment.
+ * Segment text and ids stay user-editable; only `words` (and segment interval
+ * bounds when refined) change. On API/provider failure the original transcript
+ * is returned unchanged so the review path is never blocked.
+ */
+export async function refineTranscriptWordTimes(
+  transcript: Transcript,
+  options: {
+    readonly audioBytes?: Uint8Array;
+    readonly pcm?: Float32Array;
+    readonly sampleRateHz?: number;
+    readonly provider?: CtcFramePosteriorsProvider;
+    readonly offline?: boolean;
+  } = {},
+): Promise<TranscriptRefineResult> {
+  const segments = transcript.segments.filter(
+    (segment) => segment.text.trim().length > 0,
+  );
+  if (segments.length === 0) {
+    return {
+      transcript,
+      alignment: null,
+      message: 'No transcript segments to align.',
+    };
+  }
+  try {
+    const alignment = await refineWordTimesAcoustic({
+      segments: segments.map((segment) => ({
+        id: segment.id,
+        text: segment.text,
+        start: segment.interval.start.value,
+        end: segment.interval.end.value,
+        speakerId: segment.speakerId,
+      })),
+      timebaseId: transcript.timebase.id as AudioTimebaseId,
+      sampleRateHz: options.sampleRateHz ?? 16_000,
+      ...(options.audioBytes ? { audioBytes: options.audioBytes } : {}),
+      ...(options.pcm ? { pcm: options.pcm } : {}),
+      ...(options.provider ? { provider: options.provider } : {}),
+      ...(options.offline !== undefined ? { offline: options.offline } : {}),
+    });
+
+    const bySegment = new Map<string, WordTimestamp[]>();
+    for (const word of alignment.words) {
+      const match = /^acoustic:(.+):word-\d+$/u.exec(word.id);
+      const segmentId = match?.[1];
+      if (!segmentId) continue;
+      const list = bySegment.get(segmentId);
+      if (list) list.push(word);
+      else bySegment.set(segmentId, [word]);
+    }
+
+    const refinedSegments = transcript.segments.map((segment) => {
+      const refinedWords = bySegment.get(segment.id);
+      if (!refinedWords || refinedWords.length === 0) return segment;
+      const first = refinedWords[0]!;
+      const last = refinedWords[refinedWords.length - 1]!;
+      return Object.freeze({
+        ...segment,
+        interval: Object.freeze({
+          start: first.start,
+          end: last.end,
+        }),
+        words: Object.freeze(refinedWords),
+      });
+    });
+
+    return {
+      transcript: Object.freeze({
+        ...transcript,
+        segments: Object.freeze(refinedSegments),
+        revision: transcript.revision + 1,
+      }),
+      alignment,
+    };
+  } catch (cause) {
+    return {
+      transcript,
+      alignment: null,
+      message:
+        cause instanceof Error
+          ? cause.message
+          : 'Acoustic word alignment failed.',
+    };
+  }
 }
 
 function bufferToBase64(bytes: Uint8Array): string {

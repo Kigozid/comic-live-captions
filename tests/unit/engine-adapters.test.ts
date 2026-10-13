@@ -221,3 +221,106 @@ describe('refineWordTimesAcoustic', () => {
     expect(result.words[0]!.start.value).toBeLessThan(result.words[0]!.end.value);
   });
 });
+
+describe('refineTranscriptWordTimes', () => {
+  const timebase = {
+    id: 'audio:transcript-refine' as AudioTimebaseId,
+    unit: 'seconds' as const,
+    sampleRateHz: 16_000,
+  };
+
+  function makeTranscript() {
+    return {
+      id: 'transcript-1',
+      audioAssetId: 'audio-1',
+      text: 'hello world',
+      durationSeconds: 1,
+      timebase,
+      speakers: [],
+      segments: [
+        {
+          id: 'seg-1',
+          text: 'hello world',
+          interval: {
+            start: { value: 0, timebase: timebase.id, unit: 'seconds' as const },
+            end: { value: 0.8, timebase: timebase.id, unit: 'seconds' as const },
+          },
+          speakerId: null,
+          words: [
+            {
+              id: 'old-1',
+              text: 'hello',
+              start: { value: 0, timebase: timebase.id, unit: 'seconds' as const },
+              end: {
+                value: 0.4,
+                timebase: timebase.id,
+                unit: 'seconds' as const,
+              },
+              speakerId: null,
+              confidence: null,
+            },
+            {
+              id: 'old-2',
+              text: 'world',
+              start: {
+                value: 0.4,
+                timebase: timebase.id,
+                unit: 'seconds' as const,
+              },
+              end: {
+                value: 0.8,
+                timebase: timebase.id,
+                unit: 'seconds' as const,
+              },
+              speakerId: null,
+              confidence: null,
+            },
+          ],
+          confidence: null,
+        },
+      ],
+      confidence: null,
+      reviewStatus: 'pending-review' as const,
+      revision: 1,
+      provenance: {
+        provider: 'mock',
+        version: '1',
+        inputHashes: ['abc'],
+      },
+    };
+  }
+
+  it('replaces segment words with acoustic alignment ids and times', async () => {
+    const { refineTranscriptWordTimes } = await import(
+      '../../apps/web/src/engine-adapters.js'
+    );
+    const transcript = makeTranscript();
+    const pcm = new Float32Array(16_000).fill(0.1);
+    const result = await refineTranscriptWordTimes(transcript as never, {
+      pcm,
+      sampleRateHz: 16_000,
+      offline: true,
+    });
+    expect(result.alignment?.algorithm).toBe('ctc-viterbi');
+    const segment = result.transcript.segments[0]!;
+    expect(segment.words.map((word) => word.text)).toEqual(['hello', 'world']);
+    expect(segment.words[0]!.id).toBe('acoustic:seg-1:word-1');
+    expect(segment.words[0]!.start.value).toBeLessThan(
+      segment.words[0]!.end.value,
+    );
+    expect(result.transcript.revision).toBe(2);
+  });
+
+  it('returns the original transcript when local alignment has no PCM', async () => {
+    const { refineTranscriptWordTimes } = await import(
+      '../../apps/web/src/engine-adapters.js'
+    );
+    const transcript = makeTranscript();
+    const result = await refineTranscriptWordTimes(transcript as never, {
+      offline: true,
+    });
+    expect(result.alignment).toBeNull();
+    expect(result.transcript).toBe(transcript);
+    expect(result.message).toMatch(/PCM/u);
+  });
+});

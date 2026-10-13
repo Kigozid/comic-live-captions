@@ -38,7 +38,7 @@ import type {
   ExportCaption,
 } from '../../../packages/rendering/src/validation.js';
 import { exportComicFrame } from './browser-export.js';
-import { exportMp4, exportMp4ViaServer } from './mp4-export.js';
+import { exportMp4ViaServer } from './mp4-export.js';
 import type { Mp4ExportProgress, Mp4Resolution } from './mp4-export.js';
 import {
   autoCleanPage,

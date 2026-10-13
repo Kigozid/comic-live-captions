@@ -14,7 +14,6 @@ import type {
   BubbleDialogueReference,
   DialogueMapping,
   Transcript,
-  TranscriptSegment,
 } from '@comic-captioner/core';
 import type { BubbleId, ImageSpace } from '@comic-captioner/shared';
 import { DialogueMappingEngine } from '@comic-captioner/ai';

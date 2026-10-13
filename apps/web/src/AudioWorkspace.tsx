@@ -7,6 +7,7 @@ import {
 } from '@comic-captioner/audio-engine';
 import { requestAssist } from './assist-client.js';
 import type { AssistProposal } from './assist-client.js';
+import { refineTranscriptWordTimes } from './engine-adapters.js';
 
 const emptySnapshot: ClockSnapshot = Object.freeze({
   positionSeconds: 0,
@@ -181,10 +182,16 @@ export function AudioWorkspace({
         throw new Error(
           result.error?.message ?? 'The transcript could not be generated.',
         );
-      setTranscript(result.transcript);
+      // Prefer wav2vec2 CTC word timings when the API/weights are available.
+      // Failure keeps the provider's word times so review is never blocked.
+      const refined = await refineTranscriptWordTimes(result.transcript, {
+        audioBytes: bytes,
+        sampleRateHz: metadata.sampleRateHz,
+      });
+      setTranscript(refined.transcript);
       setTranscriptUndo([]);
       setTranscriptAssists({});
-      return result.transcript;
+      return refined.transcript;
     } catch (cause) {
       setError(
         cause instanceof Error
