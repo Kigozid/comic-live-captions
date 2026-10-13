@@ -445,4 +445,61 @@ describe('editing workspace document', () => {
       }),
     ).toBe(added);
   });
+
+  it('collapses a burst of text typing into one undo step', () => {
+    const space = createImageSpace('image:editor-typing', 200, 100);
+    const initialized = editorReducer(emptyEditorHistory, {
+      type: 'initialize',
+      imageSpace: space,
+    });
+    const added = editorReducer(initialized, {
+      type: 'add-bubble',
+      id: 'bubble-t',
+      polygon: {
+        coordinateSpace: space,
+        points: [
+          { x: 10, y: 10, coordinateSpace: space },
+          { x: 90, y: 10, coordinateSpace: space },
+          { x: 90, y: 70, coordinateSpace: space },
+          { x: 10, y: 70, coordinateSpace: space },
+        ],
+      },
+    });
+    const coalesce = (atMs: number) =>
+      ({ key: 'ocr:bubble-t', atMs }) as const;
+    let state = editorReducer(added, {
+      type: 'edit-ocr',
+      bubbleId: 'bubble-t',
+      text: 'H',
+      coalesce: coalesce(1_000),
+    });
+    state = editorReducer(state, {
+      type: 'edit-ocr',
+      bubbleId: 'bubble-t',
+      text: 'Hi',
+      coalesce: coalesce(1_050),
+    });
+    state = editorReducer(state, {
+      type: 'edit-ocr',
+      bubbleId: 'bubble-t',
+      text: 'Hi!',
+      coalesce: coalesce(1_100),
+    });
+    expect(state.present?.observations['ocr:bubble-t']?.text).toBe('Hi!');
+    // Three keystrokes added only one undo step on top of initialize + add-bubble.
+    expect(state.past.length).toBe(2);
+    const undone = editorReducer(state, { type: 'undo' });
+    expect(undone.present?.observations['ocr:bubble-t']?.text).toBe('');
+    // A typing pause starts a fresh undo step.
+    const later = editorReducer(state, {
+      type: 'edit-ocr',
+      bubbleId: 'bubble-t',
+      text: 'Hi!!',
+      coalesce: coalesce(2_000),
+    });
+    expect(
+      editorReducer(later, { type: 'undo' }).present?.observations['ocr:bubble-t']
+        ?.text,
+    ).toBe('Hi!');
+  });
 });

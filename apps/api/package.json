@@ -10,14 +10,16 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@comic-captioner/core": "workspace:*",
     "@comic-captioner/ai": "workspace:*",
     "@comic-captioner/audio-engine": "workspace:*",
     "@comic-captioner/bubble-engine": "workspace:*",
     "@comic-captioner/caption-engine": "workspace:*",
+    "@comic-captioner/core": "workspace:*",
     "@comic-captioner/image-engine": "workspace:*",
+    "@comic-captioner/rendering": "workspace:*",
     "@comic-captioner/shared": "workspace:*",
     "@paddleocr/paddleocr-js": "0.4.2",
+    "onnxruntime-node": "^1.30.0",
     "sharp": "^0.34.4"
   },
   "devDependencies": {

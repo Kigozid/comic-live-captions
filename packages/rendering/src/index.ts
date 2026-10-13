@@ -2,7 +2,10 @@ import type { CaptionLayout } from '@comic-captioner/core';
 import sharp from 'sharp';
 import { renderCaptionLayerSvg, renderDebugLayerSvg } from './svg.js';
 import type { RenderDebugOverlay } from './svg.js';
-import { validateFrameExport } from './validation.js';
+import {
+  ExportValidationError,
+  validateFrameExport,
+} from './validation.js';
 import type { ExportValidationReport, FrameExportInput } from './validation.js';
 
 export {
@@ -11,7 +14,7 @@ export {
   renderDebugLayerSvg,
 } from './svg.js';
 export type { RenderDebugOverlay } from './svg.js';
-export { validateFrameExport };
+export { ExportValidationError, validateFrameExport };
 export type {
   ExportBubble,
   ExportCaption,
@@ -20,6 +23,18 @@ export type {
   ExportValidationReport,
   FrameExportInput,
 } from './validation.js';
+export {
+  renderFrame,
+  renderFrameSequence,
+  resolveMp4Dimensions,
+} from './frame-renderer.js';
+export type {
+  FrameRenderInput,
+  FrameSequenceProgress,
+  Mp4ExportOptions,
+  Mp4Resolution,
+  RenderedFrame,
+} from './frame-renderer.js';
 
 /** Export uses the same SVG caption primitive as browser preview. */
 export class RenderingEngine {
@@ -78,12 +93,5 @@ export class RenderingEngine {
       });
     }
     return sharp(comicImage).composite(composites).png().toBuffer();
-  }
-}
-
-export class ExportValidationError extends Error {
-  constructor(readonly report: ExportValidationReport) {
-    super(`Export validation failed with ${report.issues.length} issue(s).`);
-    this.name = 'ExportValidationError';
   }
 }

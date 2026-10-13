@@ -344,7 +344,7 @@ function findNodeSpace(
   return null;
 }
 
-function freezeDocument(document: OCRDocument): OCRDocument {
+export function freezeDocument(document: OCRDocument): OCRDocument {
   const blocks = document.blocks.map((block) =>
     Object.freeze({
       ...block,

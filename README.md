@@ -28,10 +28,38 @@ page, and each detected line becomes editable source text and a caption draft.
 No Gemini key is needed for this scan, review, correction, or manual caption
 workflow.
 
+## Workflow shortcuts
+
+- **Auto-clean page** — erase bubble text from the original page so a
+  hand-prepared cleaned page is optional. Import a cleaned page anytime to
+  override.
+- **Hybrid bubble detection** — ML (YOLO) or heuristic proposals boost recall;
+  deterministic geometry always refines and scores the final contour.
+- **Reading order** — LTR/RTL (manga) toggle; panel detection feeds bubble
+  reading order used by content-based dialogue mapping.
+- **OCR review queue** — only low-confidence words/lines are queued after each
+  scan.
+- **Auto everything** — one pass (detect → OCR → transcribe → map → fit →
+  timeline) with a confidence-sorted review queue.
+- **Keyboard review** — J/K navigate, A accept, E edit, Space play, 1–9 pick
+  alternatives, ⌘Z/⌘⇧Z undo/redo.
+- **Server MP4 export** — deterministic frame render + FFmpeg encode
+  (`POST /api/export`). Falls back to browser captureStream when FFmpeg is
+  missing. Probe with `GET /api/export/ffmpeg`.
+- **ONNX models** — YOLOv10n bubble proposals + wav2vec2-base-960h CTC forced
+  alignment. Fetch with `pnpm models:fetch`; status at `GET /api/models`.
+  Env overrides: `COMIC_YOLO_MODEL`, `COMIC_WAV2VEC_MODEL`.
+- **Acoustic word timing** — `POST /api/transcribe` refines Gemini word times
+  with wav2vec2 CTC Viterbi forced alignment; `POST /api/align-words` exposes
+  the same path for the editor (`refineWordTimesAcoustic`).
+
 ## Requirements
 
 - Node.js 20.19 or newer
 - pnpm 10.17.1 (`corepack pnpm install`)
+- FFmpeg on PATH for server MP4 encode (`brew install ffmpeg` or a static build)
+- Optional ONNX models for ML bubble proposals and wav2vec2 word timing:
+  `corepack pnpm models:fetch` (downloads into `models/`, gitignored)
 
 ## Development
 

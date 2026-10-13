@@ -28,6 +28,21 @@ export {
   renderAlignmentVisualizations,
 } from './alignment.js';
 export {
+  detectTextRegionsForInpaint,
+  inpaintTextRegions,
+  InpaintError,
+} from './inpaint.js';
+export type {
+  DetectTextRegionsOptions,
+  InpaintBubbleInput,
+  InpaintMaskMethod,
+  InpaintMode,
+  InpaintOptions,
+  InpaintTextMask,
+  InpaintTextObservationInput,
+  RasterImage,
+} from './inpaint.js';
+export {
   TextDifferenceEngine,
   TextDifferenceError,
 } from './text-difference.js';
@@ -42,6 +57,23 @@ export {
   ValidatingOCRService,
 } from './ocr.js';
 export type { OCRInput, OCRProvider, OCRService } from './ocr.js';
+export {
+  buildReviewQueue,
+  mergeOcrPasses,
+  summarizeTriage,
+  DEFAULT_AGREEMENT_CONFIDENCE_BOOST,
+  DEFAULT_DISAGREEMENT_CONFIDENCE_PENALTY,
+  DEFAULT_MATCH_IOU_THRESHOLD,
+  DEFAULT_REVIEW_CONFIDENCE_THRESHOLD,
+} from './ocr-triage.js';
+export type {
+  MergeOcrPassesOptions,
+  OcrReviewItem,
+  OcrReviewItemKind,
+  OcrReviewQueueOptions,
+  OcrReviewReason,
+  OcrTriageSummary,
+} from './ocr-triage.js';
 export type {
   AffineMatrix,
   AlignmentParameters,

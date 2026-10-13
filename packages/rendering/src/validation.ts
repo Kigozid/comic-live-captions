@@ -43,6 +43,13 @@ export interface FrameExportInput {
   readonly minimumConfidence?: number;
 }
 
+export class ExportValidationError extends Error {
+  constructor(readonly report: ExportValidationReport) {
+    super(`Export validation failed with ${report.issues.length} issue(s).`);
+    this.name = 'ExportValidationError';
+  }
+}
+
 /** Validation only: uses saved fit diagnostics and never recalculates a layout. */
 export function validateFrameExport(
   captions: readonly ExportCaption[],

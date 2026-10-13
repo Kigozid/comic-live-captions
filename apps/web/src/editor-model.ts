@@ -8,6 +8,13 @@ import type {
 import type { BubbleId } from '@comic-captioner/shared';
 import { splitBubblePolygon, unionBubblePolygons } from './bubble-geometry.js';
 import {
+  pushHistory,
+  redoHistory,
+  undoHistory,
+  type CoalesceHint,
+  type HistoryState,
+} from './history.js';
+import {
   associateOCRLine,
   deduplicateOCRLines,
   groupOCRLines,
@@ -51,11 +58,7 @@ export interface EditorDocument {
   readonly order: readonly string[];
 }
 
-export interface EditorHistory {
-  readonly present: EditorDocument | null;
-  readonly past: readonly EditorDocument[];
-  readonly future: readonly EditorDocument[];
-}
+export type EditorHistory = HistoryState<EditorDocument>;
 
 export type EditorAction =
   | { readonly type: 'initialize'; readonly imageSpace: ImageSpace }
@@ -121,6 +124,8 @@ export type EditorAction =
       readonly type: 'edit-ocr';
       readonly bubbleId: string;
       readonly text: string;
+      /** Typing bursts sharing this marker collapse into one undo step. */
+      readonly coalesce?: CoalesceHint;
     }
   | {
       readonly type: 'review-ocr-observation';
@@ -133,6 +138,7 @@ export type EditorAction =
       readonly type: 'edit-loose-ocr';
       readonly observationId: string;
       readonly text: string;
+      readonly coalesce?: CoalesceHint;
     }
   | {
       readonly type: 'edit-dialogue';
@@ -153,6 +159,7 @@ export type EditorAction =
           | 'contextNote'
         >
       >;
+      readonly coalesce?: CoalesceHint;
     }
   | { readonly type: 'undo' }
   | { readonly type: 'redo' };
@@ -167,26 +174,8 @@ export function editorReducer(
   state: EditorHistory,
   action: EditorAction,
 ): EditorHistory {
-  if (action.type === 'undo') {
-    const previous = state.past.at(-1);
-    return previous
-      ? Object.freeze({
-          present: previous,
-          past: state.past.slice(0, -1),
-          future: [state.present!, ...state.future],
-        })
-      : state;
-  }
-  if (action.type === 'redo') {
-    const next = state.future[0];
-    return next
-      ? Object.freeze({
-          present: next,
-          past: [...state.past, state.present!],
-          future: state.future.slice(1),
-        })
-      : state;
-  }
+  if (action.type === 'undo') return undoHistory(state);
+  if (action.type === 'redo') return redoHistory(state);
   if (action.type === 'initialize') {
     if (state.present?.imageSpace.id === action.imageSpace.id) return state;
     return Object.freeze({
@@ -924,11 +913,13 @@ export function editorReducer(
     });
   }
   if (next === document) return state;
-  return Object.freeze({
-    present: next,
-    past: [...state.past, document],
-    future: [],
-  });
+  const coalesce =
+    action.type === 'edit-ocr' ||
+    action.type === 'edit-loose-ocr' ||
+    action.type === 'edit-dialogue'
+      ? action.coalesce
+      : undefined;
+  return pushHistory(state, next, coalesce ? { coalesce } : undefined);
 }
 
 function unionBounds(

@@ -137,6 +137,64 @@ describe('DialogueMappingEngine', () => {
     expect(result.unmappedTranscriptSegmentIds).toEqual(['seg-unknown']);
   });
 
+  it('anchors mapping on OCR content even when transcript order is reversed', () => {
+    // Audio is a dub where turns were recorded out of page reading order.
+    // Content match must win; reading order is only a tiebreaker.
+    const refs = [
+      reference('bubble-a', 'I will not surrender.', 100, 100),
+      reference('bubble-b', 'Then we fight at dawn.', 550, 180),
+    ];
+    const result = new DialogueMappingEngine().map(
+      input({
+        bubbleReferences: refs,
+        readingOrder: refs.map((item) => item.bubbleId),
+        transcriptSegments: [
+          segment('seg-b-first', 'Then we fight at dawn.', 0.1),
+          segment('seg-a-second', 'I will not surrender.', 1.2),
+        ],
+      }),
+    );
+    expect(result.mappings.map((item) => item.bubbleId)).toEqual([
+      'bubble-b',
+      'bubble-a',
+    ]);
+    expect(result.mappings[0]?.reasons.map((item) => item.signal)).toContain(
+      'text-similarity',
+    );
+  });
+
+  it('matches OCR noise and light dub paraphrases via fuzzy content distance', () => {
+    const refs = [reference('bubble-a', 'Where have you gone?', 100, 100)];
+    const mapped = new DialogueMappingEngine().map(
+      input({
+        bubbleReferences: refs,
+        readingOrder: [refs[0]!.bubbleId],
+        transcriptSegments: [
+          segment('seg-fuzzy', 'Where have you gone', 0.2), // missing punctuation
+        ],
+      }),
+    ).mappings[0]!;
+    expect(mapped.bubbleId).toBe('bubble-a');
+    expect(mapped.confidence).toBeGreaterThan(0.6);
+  });
+
+  it('prefers content match over reading-position coincidence', () => {
+    // First transcript turn would "expect" bubble-a by order, but its text is
+    // clearly bubble-b's dialogue.
+    const refs = [
+      reference('bubble-a', 'The door is locked.', 100, 100),
+      reference('bubble-b', 'Then we climb the wall.', 550, 180),
+    ];
+    const mapped = new DialogueMappingEngine().map(
+      input({
+        bubbleReferences: refs,
+        readingOrder: refs.map((item) => item.bubbleId),
+        transcriptSegments: [segment('seg-wall', 'Then we climb the wall.', 0.1)],
+      }),
+    ).mappings[0]!;
+    expect(mapped.bubbleId).toBe('bubble-b');
+  });
+
   it('uses validated semantic evidence when exact words differ', () => {
     const refs = [reference('bubble-a', 'Where have you gone?', 100, 100)];
     const mapped = new DialogueMappingEngine().map(

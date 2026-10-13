@@ -38,8 +38,16 @@ import type {
   ExportCaption,
 } from '../../../packages/rendering/src/validation.js';
 import { exportComicFrame } from './browser-export.js';
-import { exportMp4 } from './mp4-export.js';
+import { exportMp4, exportMp4ViaServer } from './mp4-export.js';
 import type { Mp4ExportProgress, Mp4Resolution } from './mp4-export.js';
+import {
+  autoCleanPage,
+  detectBubblesHybrid,
+  detectPanelsAndOrder,
+  rasterFromImageSource,
+  rasterToPngBlob,
+  triageOcrDocument,
+} from './engine-adapters.js';
 
 interface ImagePair {
   readonly original: SourceImageMetadata | null;
@@ -535,6 +543,22 @@ export function App() {
     };
   } | null>(null);
   const [pageAnalysisBusy, setPageAnalysisBusy] = useState(false);
+  const [autoCleanBusy, setAutoCleanBusy] = useState(false);
+  const [readingDirection, setReadingDirection] = useState<'ltr' | 'rtl'>('ltr');
+  const [bubbleProposalSource, setBubbleProposalSource] = useState<
+    'heuristic' | 'ml'
+  >('heuristic');
+  const [readingOrder, setReadingOrder] = useState<readonly string[] | null>(
+    null,
+  );
+  const [ocrReviewItems, setOcrReviewItems] = useState<
+    readonly {
+      readonly id: string;
+      readonly text: string;
+      readonly confidence: number;
+      readonly reason: string;
+    }[]
+  >([]);
   const [ocrDocument, setOcrDocument] = useState<OCRDocument | null>(null);
   const [ocrStatus, setOcrStatus] = useState<PaddleOCRStatus | null>(null);
   const ocrRequestIdRef = useRef(0);
@@ -682,6 +706,117 @@ export function App() {
       );
     } finally {
       setBusyRole(null);
+    }
+  }
+
+  /**
+   * Auto-inpaint: erase bubble text from the original page so users can skip
+   * hand-preparing a cleaned page. The original+cleaned path stays available
+   * as a pro override.
+   */
+  async function autoCleanFromOriginal() {
+    const file = sourceBlobs.original;
+    const metadata = pair.original;
+    if (!file || !metadata) return;
+    setAutoCleanBusy(true);
+    setError(null);
+    try {
+      const raster = await rasterFromImageSource(file);
+      // First pass: detect bubbles so inpaint can localize text regions.
+      const detection = await detectBubblesHybrid(
+        new Uint8Array(await file.arrayBuffer()),
+        createImageSpace(
+          `workspace:${metadata.id}`,
+          metadata.dimensions.width,
+          metadata.dimensions.height,
+        ),
+        {
+          proposalSource:
+            bubbleProposalSource === 'ml'
+              ? { kind: 'yolo-onnx' }
+              : { kind: 'heuristic' },
+        },
+      );
+      const bubbles = detection.bubbles.map((hybrid) => ({
+        id: hybrid.bubble.id,
+        contour: hybrid.bubble.contour,
+      }));
+      const textObservations = ocrDocument
+        ? ocrDocument.blocks.flatMap((block) =>
+            block.lines.map((line) => ({
+              id: line.id,
+              polygon: {
+                points: [
+                  {
+                    x: line.boundingBox.x,
+                    y: line.boundingBox.y,
+                    coordinateSpace: line.coordinateSpace,
+                  },
+                  {
+                    x: line.boundingBox.x + line.boundingBox.width,
+                    y: line.boundingBox.y,
+                    coordinateSpace: line.coordinateSpace,
+                  },
+                  {
+                    x: line.boundingBox.x + line.boundingBox.width,
+                    y: line.boundingBox.y + line.boundingBox.height,
+                    coordinateSpace: line.coordinateSpace,
+                  },
+                  {
+                    x: line.boundingBox.x,
+                    y: line.boundingBox.y + line.boundingBox.height,
+                    coordinateSpace: line.coordinateSpace,
+                  },
+                ],
+                coordinateSpace: line.coordinateSpace,
+              },
+            })),
+          )
+        : undefined;
+      const result = autoCleanPage(raster, bubbles, textObservations);
+      const cleanedBlob = await rasterToPngBlob(result.cleaned);
+      const cleanedFile = new File(
+        [cleanedBlob],
+        `auto-cleaned-${metadata.filename ?? 'page.png'}`,
+        { type: 'image/png' },
+      );
+      // Import through the same path as a hand-prepared cleaned page.
+      const form = new FormData();
+      form.set('image', cleanedFile);
+      const response = await fetch('/api/images/cleaned', {
+        method: 'POST',
+        body: form,
+      });
+      const imported = (await response.json()) as {
+        readonly image?: SourceImageMetadata;
+        readonly pair?: ImagePair;
+        readonly error?: { readonly message?: string };
+      };
+      if (!response.ok || !imported.image || !imported.pair) {
+        throw new Error(
+          imported.error?.message ?? 'Auto-cleaned page could not be imported.',
+        );
+      }
+      setPair(imported.pair);
+      setSourceBlobs((previous) => ({ ...previous, cleaned: cleanedFile }));
+      setSourceUrls((previous) => {
+        if (previous.cleaned) URL.revokeObjectURL(previous.cleaned);
+        return {
+          ...previous,
+          cleaned: URL.createObjectURL(cleanedFile),
+        };
+      });
+      setProjectMessage(
+        `Auto-clean erased ${result.erasedPixelCount.toLocaleString()} text pixels across ${result.masks.length} bubble region(s). Review the cleaned page, or import a hand-prepared cleaned page to override.`,
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Auto-clean failed. Import a cleaned page manually instead.',
+      );
+    } finally {
+      setAutoCleanBusy(false);
     }
   }
 
@@ -899,14 +1034,80 @@ export function App() {
     };
     if (!response.ok || !result?.bubbles || !result.ocr)
       throw new Error(result?.error?.message ?? 'Bubble detection failed.');
+
+    // Hybrid recall boost: heuristic proposals + deterministic geometry.
+    // Also derive panel reading order (LTR/RTL) for mapping.
+    let bubbles = result.bubbles;
+    let order: readonly string[] | null = null;
+    const role = pair.cleaned ? 'cleaned' : 'original';
+    const pageBlob = sourceBlobs[role];
+    const pageMeta = pair[role];
+    if (pageBlob && pageMeta) {
+      try {
+        const space = createImageSpace(
+          `workspace:${pageMeta.id}`,
+          pageMeta.dimensions.width,
+          pageMeta.dimensions.height,
+        );
+        const pageBytes = new Uint8Array(await pageBlob.arrayBuffer());
+        const hybrid = await detectBubblesHybrid(pageBytes, space, {
+          proposalSource:
+            bubbleProposalSource === 'ml'
+              ? { kind: 'yolo-onnx' }
+              : { kind: 'heuristic' },
+        });
+        if (hybrid.bubbles.length > bubbles.length) {
+          bubbles = hybrid.bubbles.map((hybridBubble) => ({
+            id: hybridBubble.bubble.id,
+            kind: hybridBubble.bubble.kind,
+            confidence: hybridBubble.bubble.confidence,
+            ...(hybridBubble.bubble.classificationConfidence !== undefined
+              ? {
+                  classificationConfidence:
+                    hybridBubble.bubble.classificationConfidence,
+                }
+              : {}),
+            polygon: { points: hybridBubble.bubble.polygon.points },
+            tail: hybridBubble.bubble.tail ?? null,
+            reviewStatus: 'pending-review' as const,
+          })) as typeof bubbles;
+        }
+        const panelOrder = await detectPanelsAndOrder(
+          pageBytes,
+          space,
+          bubbles.map((bubble) => {
+            const xs = bubble.polygon.points.map((point) => point.x);
+            const ys = bubble.polygon.points.map((point) => point.y);
+            return {
+              id: bubble.id,
+              boundingBox: {
+                x: Math.min(...xs),
+                y: Math.min(...ys),
+                width: Math.max(...xs) - Math.min(...xs),
+                height: Math.max(...ys) - Math.min(...ys),
+                coordinateSpace: space,
+              },
+            };
+          }),
+          readingDirection,
+        );
+        order = panelOrder.readingOrder;
+        setReadingOrder(order);
+      } catch {
+        // Hybrid/panel analysis is an enhancement; keep server bubbles if it fails.
+      }
+    }
+
     setPageAnalysis((previous) => ({
-      bubbles: result.bubbles,
+      bubbles,
       ocr: previous?.ocr ?? result.ocr,
     }));
     setProjectMessage(
-      `Bubble scan found ${result.bubbles.length} candidates. Review and select regions on the comic canvas.`,
+      order
+        ? `Bubble scan found ${bubbles.length} candidates (reading order: ${order.length} panels/bubbles, ${readingDirection.toUpperCase()}). Review regions on the comic canvas.`
+        : `Bubble scan found ${bubbles.length} candidates. Review and select regions on the comic canvas.`,
     );
-    return result;
+    return { ...result, bubbles };
   }
 
   async function extractPageText(
@@ -1022,9 +1223,32 @@ export function App() {
     setPageAnalysis((previous) => ({ bubbles: previous?.bubbles ?? [], ocr }));
     setOcrDocument(recognized.document);
     setOcrMetrics(recognized.metrics);
-    setProjectMessage(
-      `${enhanced ? (bubbleRegions.length ? 'Enhanced bubble-crop OCR' : textRegionCrops.length ? 'Enhanced text-region OCR' : 'Enhanced page OCR') : bubbleRegions.length ? 'Bubble-crop OCR' : 'Page OCR'} found ${recognized.metrics.detectedTextRegions} text regions in ${Math.round(recognized.metrics.totalMs)} ms. Review the extracted text on the canvas and in each bubble.`,
-    );
+    // Confidence triage: only uncertain words/lines need review.
+    try {
+      const triage = triageOcrDocument(recognized.document, {
+        confidenceThreshold: 0.85,
+        maxItems: 40,
+      });
+      setOcrReviewItems(
+        triage.reviewItems.map((item) => ({
+          id: item.id,
+          text: item.text,
+          confidence: item.confidence,
+          reason:
+            item.reason === 'pass-disagreement'
+              ? 'OCR passes disagreed on this text.'
+              : `Confidence ${Math.round(item.confidence * 100)}% is below the review threshold.`,
+        })),
+      );
+      const uncertain = triage.summary.uncertainCount;
+      setProjectMessage(
+        `${enhanced ? (bubbleRegions.length ? 'Enhanced bubble-crop OCR' : textRegionCrops.length ? 'Enhanced text-region OCR' : 'Enhanced page OCR') : bubbleRegions.length ? 'Bubble-crop OCR' : 'Page OCR'} found ${recognized.metrics.detectedTextRegions} text regions in ${Math.round(recognized.metrics.totalMs)} ms${uncertain > 0 ? ` · ${uncertain} uncertain item(s) queued for review` : ' · all text is high-confidence'}.`,
+      );
+    } catch {
+      setProjectMessage(
+        `${enhanced ? (bubbleRegions.length ? 'Enhanced bubble-crop OCR' : textRegionCrops.length ? 'Enhanced text-region OCR' : 'Enhanced page OCR') : bubbleRegions.length ? 'Bubble-crop OCR' : 'Page OCR'} found ${recognized.metrics.detectedTextRegions} text regions in ${Math.round(recognized.metrics.totalMs)} ms. Review the extracted text on the canvas and in each bubble.`,
+      );
+    }
     return recognized.document;
   }
 
@@ -1589,9 +1813,10 @@ export function App() {
   }
 
   async function exportVideo() {
-    if (!sourceBlobs.cleaned || !audioSource?.blob) {
+    const pageBlob = sourceBlobs.cleaned ?? sourceBlobs.original;
+    if (!pageBlob || !audioSource?.blob) {
       setProjectMessage(
-        'MP4 export needs both the cleaned comic page and audio.',
+        'MP4 export needs a comic page (cleaned or original) and audio.',
       );
       return;
     }
@@ -1601,8 +1826,10 @@ export function App() {
     setMp4Progress({ percent: 0, currentTime: 0, duration: 0 });
     try {
       const { captions, bubbles } = exportTimelineData();
-      const blob = await exportMp4(
-        sourceBlobs.cleaned,
+      // Prefer server-side deterministic FFmpeg encode; falls back to browser
+      // captureStream when FFmpeg is missing or the API is unreachable.
+      const blob = await exportMp4ViaServer(
+        pageBlob,
         audioSource.blob,
         captions,
         bubbles,
@@ -1685,8 +1912,13 @@ export function App() {
   const reviewLayouts = (activeProject?.captionLayouts ??
     []) as readonly CaptionLayout[];
   const automaticMappings = useMemo(
-    () => proposeTranscriptBubbleMappings(editorDocument, savedTranscript),
-    [editorDocument, savedTranscript],
+    () =>
+      proposeTranscriptBubbleMappings(
+        editorDocument,
+        savedTranscript,
+        readingOrder,
+      ),
+    [editorDocument, savedTranscript, readingOrder],
   );
   const reviewMappings =
     speechProposals?.map((proposal) => proposal.mapping) ?? automaticMappings;
@@ -2069,6 +2301,48 @@ export function App() {
               label="Cleaned comic"
               onSelect={(file) => void importImage('cleaned', file)}
             />
+            <button
+              className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm font-semibold text-violet-900 shadow-sm hover:bg-violet-100 disabled:opacity-50"
+              disabled={!pair.original || autoCleanBusy || busyRole !== null}
+              onClick={() => void autoCleanFromOriginal()}
+              type="button"
+              title="Erase bubble text from the original page automatically. Import a hand-prepared cleaned page anytime to override."
+            >
+              {autoCleanBusy ? 'Auto-cleaning…' : 'Auto-clean page'}
+            </button>
+            <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm font-medium text-stone-800 shadow-sm">
+              Reading order
+              <select
+                className="rounded border border-stone-300 px-2 py-1 text-sm"
+                value={readingDirection}
+                onChange={(event) => {
+                  setReadingDirection(
+                    event.target.value === 'rtl' ? 'rtl' : 'ltr',
+                  );
+                }}
+              >
+                <option value="ltr">LTR</option>
+                <option value="rtl">RTL (manga)</option>
+              </select>
+            </label>
+            <label
+              className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm font-medium text-stone-800 shadow-sm"
+              title="ML proposes bubble candidates to boost recall; deterministic geometry always refines and scores the final contour."
+            >
+              Bubble proposals
+              <select
+                className="rounded border border-stone-300 px-2 py-1 text-sm"
+                value={bubbleProposalSource}
+                onChange={(event) => {
+                  setBubbleProposalSource(
+                    event.target.value === 'ml' ? 'ml' : 'heuristic',
+                  );
+                }}
+              >
+                <option value="heuristic">Heuristic</option>
+                <option value="ml">ML (YOLO)</option>
+              </select>
+            </label>
           </div>
           {ocrStatus && (
             <div
@@ -2087,6 +2361,29 @@ export function App() {
                   confidence
                 </span>
               )}
+            </div>
+          )}
+          {ocrReviewItems.length > 0 && (
+            <div
+              className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950"
+              aria-label="OCR confidence review queue"
+            >
+              <div className="font-semibold">
+                OCR review queue · {ocrReviewItems.length} uncertain item(s)
+              </div>
+              <div className="mt-1 max-h-28 space-y-1 overflow-y-auto">
+                {ocrReviewItems.map((item) => (
+                  <div className="flex items-start gap-2 text-xs" key={item.id}>
+                    <span className="tabular-nums font-semibold">
+                      {Math.round(item.confidence * 100)}%
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="font-medium">{item.text || '(empty)'}</span>
+                      <span className="block text-amber-800">{item.reason}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </header>
@@ -2171,6 +2468,7 @@ export function App() {
                 speechAutomationReady={Boolean(
                   original && cleaned && alignment && audioSource,
                 )}
+                readingOrder={readingOrder}
                 onDocumentChange={(value) => {
                   editorDocumentRef.current = value;
                   setEditorDocument(value);

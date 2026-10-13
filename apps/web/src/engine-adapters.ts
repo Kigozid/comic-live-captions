@@ -1,0 +1,592 @@
+/**
+ * Web-side adapters for geometry/OCR/pacing engines.
+ *
+ * These wrap deterministic package engines so the editor can call them without
+ * owning page geometry. Every result is a proposal the UI can review and edit;
+ * nothing here mutates project state.
+ */
+
+import type {
+  OCRDocument,
+  OCRWord,
+  OCRLine,
+  OCRBlock,
+  ImageSpace,
+  Polygon,
+  Bounds,
+} from '@comic-captioner/shared';
+import {
+  detectTextRegionsForInpaint,
+  inpaintTextRegions,
+  type InpaintBubbleInput,
+  type InpaintTextObservationInput,
+  type InpaintTextMask,
+  type InpaintMode,
+  type RasterImage,
+} from '../../../packages/image-engine/src/inpaint.js';
+import {
+  buildReviewQueue as buildOcrReviewQueue,
+  mergeOcrPasses,
+  summarizeTriage,
+  type OcrReviewItem,
+  type OcrTriageSummary,
+} from '../../../packages/image-engine/src/ocr-triage.js';
+import {
+  HeuristicProposalProvider,
+  HybridBubbleDetector,
+  type BubbleProposalProvider,
+  type HybridBubble,
+  type HybridBubbleDetectionResult,
+} from '../../../packages/bubble-engine/src/hybrid-detection.js';
+import {
+  SyntheticYoloSession,
+  YoloBubbleProposalProvider,
+  createOnnxYoloSession,
+  type YoloInferenceSession,
+} from '../../../packages/bubble-engine/src/ml-bubble-detector.js';
+import {
+  detectPanels,
+  deriveReadingOrder,
+  type Panel,
+  type ReadingDirection,
+} from '../../../packages/bubble-engine/src/panel-order.js';
+import {
+  proposePagePacing,
+  type PagePacingProposal,
+  type PageDialogueSegmentRef,
+  type PacedPageInput,
+} from '../../../packages/caption-engine/src/page-pacing.js';
+import {
+  SyntheticCtcPosteriorsProvider,
+  alignWordsAcoustic,
+  type CtcFramePosteriorsProvider,
+  type ForcedAlignAcousticResult,
+} from '../../../packages/audio-engine/src/wav2vec2-alignment.js';
+import type { WordTimestamp } from '@comic-captioner/core';
+import type {
+  BubbleId,
+  PageId,
+  AudioTimebaseId,
+} from '@comic-captioner/shared';
+
+export interface AutoCleanResult {
+  readonly cleaned: RasterImage;
+  readonly masks: readonly InpaintTextMask[];
+  readonly erasedPixelCount: number;
+  readonly modes: readonly {
+    readonly bubbleId: string;
+    readonly mode: InpaintMode;
+    readonly confidence: number;
+  }[];
+}
+
+/**
+ * Detect speech-bubble text on an original page and erase it, producing a
+ * cleaned page. The original+cleaned workflow remains available as a pro
+ * override when the auto result is not good enough.
+ */
+export function autoCleanPage(
+  original: RasterImage,
+  bubbles: readonly InpaintBubbleInput[],
+  textObservations?: readonly InpaintTextObservationInput[],
+): AutoCleanResult {
+  const masks = detectTextRegionsForInpaint(
+    original,
+    bubbles,
+    textObservations,
+  );
+  const cleaned = inpaintTextRegions(original, masks);
+  let erasedPixelCount = 0;
+  for (const mask of masks) {
+    for (const pixel of mask.pixels) {
+      if (pixel) erasedPixelCount += 1;
+    }
+  }
+  return {
+    cleaned,
+    masks,
+    erasedPixelCount,
+    modes: masks.map((mask) => ({
+      bubbleId: mask.bubbleId,
+      mode: mask.suggestedMode,
+      confidence: mask.confidence,
+    })),
+  };
+}
+
+export type BubbleProposalSource =
+  | { readonly kind: 'heuristic' }
+  | { readonly kind: 'synthetic-ml' }
+  | {
+      readonly kind: 'yolo-session';
+      readonly session: YoloInferenceSession;
+    }
+  | { readonly kind: 'yolo-onnx' };
+
+export interface HybridDetectResult {
+  readonly bubbles: readonly HybridBubble[];
+  readonly result: HybridBubbleDetectionResult;
+  readonly source: 'api' | 'local';
+  readonly provider: string | null;
+}
+
+/**
+ * Hybrid bubble detection: proposals boost recall (ML preferred, heuristic
+ * fallback), deterministic geometry refines and scores every contour.
+ *
+ * Production path: `POST /api/detect-bubbles` with the API's ONNX YOLOv10.
+ * Offline path: local HybridBubbleDetector with heuristic/synthetic/session.
+ */
+export async function detectBubblesHybrid(
+  pageImage: Uint8Array,
+  space: ImageSpace,
+  options: {
+    readonly proposalSource?: BubbleProposalSource;
+  } = {},
+): Promise<HybridDetectResult> {
+  const source = options.proposalSource ?? { kind: 'heuristic' as const };
+
+  // 1) Server-side YOLO ONNX (real weights) — same pattern as align-words.
+  if (source.kind === 'yolo-onnx') {
+    try {
+      const base64 = bufferToBase64(pageImage);
+      const response = await fetch('/api/detect-bubbles', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pageImage: base64,
+          width: space.dimensions.width,
+          height: space.dimensions.height,
+          spaceId: space.id,
+          requireYolo: true,
+        }),
+      });
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          bubbles: readonly HybridBubble[];
+          detection: {
+            mode: string;
+            provider: string | null;
+            proposalCount?: number;
+          };
+        };
+        return {
+          bubbles: payload.bubbles,
+          result: {
+            bubbles: payload.bubbles,
+            coordinateSpace: space,
+            deterministicCount: payload.bubbles.length,
+            proposalCount: payload.detection.proposalCount ?? 0,
+            mergedCount: 0,
+            refinedCount: 0,
+            rejectedCount: 0,
+            providerName: payload.detection.provider,
+          },
+          source: 'api',
+          provider: payload.detection.provider,
+        };
+      }
+    } catch {
+      // Fall through to local detector.
+    }
+  }
+
+  // 2) Local hybrid detector.
+  const provider = createProposalProvider(source);
+  const detector = new HybridBubbleDetector({
+    ...(provider ? { provider } : {}),
+  });
+  const result = await detector.detect(pageImage, space);
+  return {
+    bubbles: result.bubbles,
+    result,
+    source: 'local',
+    provider: result.providerName,
+  };
+}
+
+function createProposalProvider(
+  source: BubbleProposalSource,
+): BubbleProposalProvider | null {
+  switch (source.kind) {
+    case 'heuristic':
+      return new HeuristicProposalProvider();
+    case 'synthetic-ml':
+      return new YoloBubbleProposalProvider({
+        session: new SyntheticYoloSession(),
+      });
+    case 'yolo-session':
+      return new YoloBubbleProposalProvider({ session: source.session });
+    case 'yolo-onnx':
+      // API path failed; fall back to heuristic recall boost.
+      return new HeuristicProposalProvider();
+  }
+}
+
+/**
+ * Load an ONNX YOLO bubble model as a proposal session. The host supplies the
+ * loaded inference session (onnxruntime-web in the browser).
+ */
+export function loadYoloBubbleSession(options: {
+  readonly modelPathOrUri: string;
+  readonly session: Parameters<typeof createOnnxYoloSession>[0]['session'];
+  readonly format?: 'yolov5' | 'yolov8';
+  readonly inputWidth?: number;
+  readonly inputHeight?: number;
+  readonly numClasses?: number;
+}): YoloInferenceSession {
+  return createOnnxYoloSession({
+    modelPathOrUri: options.modelPathOrUri,
+    ...(options.session ? { session: options.session } : {}),
+    ...(options.format ? { format: options.format } : {}),
+    ...(options.inputWidth !== undefined
+      ? { inputWidth: options.inputWidth }
+      : {}),
+    ...(options.inputHeight !== undefined
+      ? { inputHeight: options.inputHeight }
+      : {}),
+    ...(options.numClasses !== undefined
+      ? { numClasses: options.numClasses }
+      : {}),
+  });
+}
+
+export interface PanelOrderResult {
+  readonly panels: readonly Panel[];
+  readonly readingOrder: readonly string[];
+}
+
+/** Detect panels and derive bubble reading order with LTR/RTL support. */
+export async function detectPanelsAndOrder(
+  pageImage: Uint8Array,
+  space: ImageSpace,
+  bubbleBounds: readonly {
+    readonly id: string;
+    readonly boundingBox: Bounds<ImageSpace>;
+  }[],
+  direction: ReadingDirection = 'ltr',
+): Promise<PanelOrderResult> {
+  const detection = await detectPanels(pageImage, space);
+  const readingOrder = deriveReadingOrder(
+    bubbleBounds,
+    detection.panels,
+    direction,
+  );
+  return {
+    panels: detection.panels,
+    readingOrder,
+  };
+}
+
+export interface OcrTriageResult {
+  readonly merged: OCRDocument;
+  readonly reviewItems: readonly OcrReviewItem[];
+  readonly summary: OcrTriageSummary;
+}
+
+/**
+ * Two-pass OCR triage: merge pass votes and queue only uncertain words/lines.
+ * Manually edited words are preserved.
+ */
+export function triageOcrPasses(
+  passA: OCRDocument,
+  passB: OCRDocument,
+  options: {
+    readonly confidenceThreshold?: number;
+    readonly maxItems?: number;
+    readonly manualWordIds?: readonly string[];
+  } = {},
+): OcrTriageResult {
+  const merged = mergeOcrPasses(passA, passB, {
+    ...(options.manualWordIds ? { manualWordIds: options.manualWordIds } : {}),
+  });
+  const reviewItems = buildOcrReviewQueue(merged, {
+    ...(options.confidenceThreshold !== undefined
+      ? { confidenceThreshold: options.confidenceThreshold }
+      : {}),
+    ...(options.maxItems !== undefined ? { maxItems: options.maxItems } : {}),
+    otherPass: passB,
+  });
+  const summary = summarizeTriage(merged, reviewItems);
+  return { merged, reviewItems, summary };
+}
+
+/** Single-pass triage when only one OCR document is available. */
+export function triageOcrDocument(
+  document: OCRDocument,
+  options: {
+    readonly confidenceThreshold?: number;
+    readonly maxItems?: number;
+  } = {},
+): { readonly reviewItems: readonly OcrReviewItem[]; readonly summary: OcrTriageSummary } {
+  const reviewItems = buildOcrReviewQueue(document, {
+    ...(options.confidenceThreshold !== undefined
+      ? { confidenceThreshold: options.confidenceThreshold }
+      : {}),
+    ...(options.maxItems !== undefined ? { maxItems: options.maxItems } : {}),
+  });
+  return { reviewItems, summary: summarizeTriage(document, reviewItems) };
+}
+
+export interface PagePacingAdapterInput {
+  readonly pageIds: readonly string[];
+  readonly cuesByPage: Readonly<
+    Record<string, readonly { readonly id: string; readonly bubbleId: string; readonly start: number; readonly end: number }[]>
+  >;
+  readonly timebaseId: AudioTimebaseId;
+  readonly audioDurationSeconds: number;
+  readonly overrides?: readonly {
+    readonly pageId: string;
+    readonly start: number;
+    readonly end: number;
+  }[];
+}
+
+/**
+ * Propose page boundaries from dialogue mapping. Each page covers the
+ * segments mapped to its bubbles; explicit overrides win.
+ */
+export function proposePagePacingFromDialogues(
+  input: PagePacingAdapterInput,
+): readonly PagePacingProposal[] {
+  const pages: PacedPageInput[] = input.pageIds.map((id) => ({
+    id: id as PageId,
+    segments: (input.cuesByPage[id] ?? []).map(
+      (cue): PageDialogueSegmentRef => ({
+        id: cue.id,
+        bubbleId: cue.bubbleId as BubbleId,
+        interval: {
+          start: {
+            value: cue.start,
+            timebase: input.timebaseId,
+            unit: 'seconds',
+          },
+          end: {
+            value: cue.end,
+            timebase: input.timebaseId,
+            unit: 'seconds',
+          },
+        },
+      }),
+    ),
+  }));
+  return proposePagePacing({
+    pages,
+    timebase: {
+      id: input.timebaseId,
+      unit: 'seconds',
+    },
+    audioSpan: {
+      start: { value: 0, timebase: input.timebaseId, unit: 'seconds' },
+      end: {
+        value: input.audioDurationSeconds,
+        timebase: input.timebaseId,
+        unit: 'seconds',
+      },
+    },
+    ...(input.overrides
+      ? {
+          overrides: input.overrides.map((override) => ({
+            pageId: override.pageId as PageId,
+            start: {
+              value: override.start,
+              timebase: input.timebaseId,
+              unit: 'seconds',
+            },
+            end: {
+              value: override.end,
+              timebase: input.timebaseId,
+              unit: 'seconds',
+            },
+          })),
+        }
+      : {}),
+  });
+}
+
+/** Decode an ImageBitmap/canvas source into the RasterImage the inpaint engine expects. */
+export async function rasterFromImageSource(
+  source: Blob | ImageBitmap | HTMLImageElement,
+): Promise<RasterImage> {
+  let bitmap: ImageBitmap;
+  if (source instanceof ImageBitmap) {
+    bitmap = source;
+  } else if (source instanceof Blob) {
+    bitmap = await createImageBitmap(source);
+  } else {
+    bitmap = await createImageBitmap(source);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    bitmap.close?.();
+    throw new Error('Could not create a canvas for page rasterization.');
+  }
+  context.drawImage(bitmap, 0, 0);
+  const imageData = context.getImageData(0, 0, bitmap.width, bitmap.height);
+  if (source instanceof Blob) bitmap.close?.();
+  return {
+    width: imageData.width,
+    height: imageData.height,
+    data: imageData.data,
+  };
+}
+
+/** Encode a cleaned raster as a PNG Blob for the cleaned-page slot. */
+export async function rasterToPngBlob(raster: RasterImage): Promise<Blob> {
+  const canvas = document.createElement('canvas');
+  canvas.width = raster.width;
+  canvas.height = raster.height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Could not create a canvas for PNG encoding.');
+  const imageData = new ImageData(
+    new Uint8ClampedArray(raster.data),
+    raster.width,
+    raster.height,
+  );
+  context.putImageData(imageData, 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Could not encode cleaned page as PNG.'));
+    }, 'image/png');
+  });
+}
+
+export interface AcousticAlignInput {
+  readonly segments: readonly {
+    readonly id?: string;
+    readonly text: string;
+    readonly start: number;
+    readonly end: number;
+    readonly speakerId?: string | null;
+  }[];
+  readonly pcm: Float32Array;
+  readonly sampleRateHz: number;
+  readonly timebaseId: AudioTimebaseId;
+  /**
+   * Optional custom wav2vec2/CTC backend. When omitted, this function calls
+   * `POST /api/align-words` (server-side ONNX wav2vec2) and only falls back to
+   * the synthetic provider if the API is unreachable.
+   */
+  readonly provider?: CtcFramePosteriorsProvider;
+  /** Skip the API and use only the local provider (tests). */
+  readonly offline?: boolean;
+}
+
+export interface AcousticAlignResult {
+  readonly words: readonly WordTimestamp[];
+  readonly confidence: number;
+  readonly algorithm: string;
+  readonly provider: string;
+  readonly source: 'api' | 'local';
+}
+
+/**
+ * WhisperX-style word timestamps: CTC Viterbi forced alignment of transcript
+ * tokens to acoustic frames.
+ *
+ * Production path: `POST /api/align-words` with the API's ONNX wav2vec2.
+ * Offline/test path: injected `provider` or synthetic CTC posteriors.
+ */
+export async function refineWordTimesAcoustic(
+  input: AcousticAlignInput,
+): Promise<AcousticAlignResult> {
+  // 1) Server-side wav2vec2 (real ONNX weights).
+  if (!input.provider && !input.offline) {
+    try {
+      const pcmBuffer = input.pcm.buffer.slice(
+        input.pcm.byteOffset,
+        input.pcm.byteOffset + input.pcm.byteLength,
+      );
+      const pcmBase64 = bufferToBase64(new Uint8Array(pcmBuffer));
+      const response = await fetch('/api/align-words', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pcm: pcmBase64,
+          sampleRateHz: input.sampleRateHz,
+          timebaseId: input.timebaseId,
+          segments: input.segments.map((segment) => ({
+            ...(segment.id ? { id: segment.id } : {}),
+            text: segment.text,
+            start: segment.start,
+            end: segment.end,
+            ...(segment.speakerId !== undefined
+              ? { speakerId: segment.speakerId }
+              : {}),
+          })),
+        }),
+      });
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          words: WordTimestamp[];
+          confidence: number;
+          algorithm: string;
+          provider: string;
+        };
+        return {
+          words: payload.words,
+          confidence: payload.confidence,
+          algorithm: payload.algorithm,
+          provider: payload.provider,
+          source: 'api',
+        };
+      }
+    } catch {
+      // Fall through to local provider.
+    }
+  }
+
+  // 2) Injected provider or synthetic fallback.
+  const provider = input.provider ?? new SyntheticCtcPosteriorsProvider();
+  const result: ForcedAlignAcousticResult = await alignWordsAcoustic({
+    segments: input.segments.map((segment) => ({
+      ...(segment.id ? { id: segment.id } : {}),
+      text: segment.text,
+      interval: {
+        start: {
+          value: segment.start,
+          timebase: input.timebaseId,
+          unit: 'seconds',
+        },
+        end: {
+          value: segment.end,
+          timebase: input.timebaseId,
+          unit: 'seconds',
+        },
+      },
+      ...(segment.speakerId !== undefined
+        ? { speakerId: segment.speakerId }
+        : {}),
+    })),
+    timebase: { id: input.timebaseId, unit: 'seconds' },
+    pcm: input.pcm,
+    sampleRateHz: input.sampleRateHz,
+    provider,
+  });
+  return {
+    words: result.words,
+    confidence: result.confidence,
+    algorithm: result.algorithm,
+    provider: result.provider,
+    source: 'local',
+  };
+}
+
+function bufferToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === 'function') {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(
+        ...bytes.subarray(offset, offset + chunkSize),
+      );
+    }
+    return btoa(binary);
+  }
+  // Node / vitest
+  return Buffer.from(bytes).toString('base64');
+}

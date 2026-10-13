@@ -86,6 +86,44 @@ export type {
   BubbleSemanticResolver,
 } from './association.js';
 export {
+  HeuristicProposalProvider,
+  HybridBubbleDetectionError,
+  HybridBubbleDetector,
+} from './hybrid-detection.js';
+export type {
+  BubbleProposal,
+  BubbleProposalProvenance,
+  BubbleProposalProvider,
+  GeometryQuality,
+  HeuristicProposalProviderOptions,
+  HybridBubble,
+  HybridBubbleDetectionResult,
+  HybridBubbleDetectorOptions,
+  HybridBubbleSource,
+  HybridDetectionOptions,
+  ProposalSupport,
+} from './hybrid-detection.js';
+export {
+  COMIC_BUBBLE_CLASSES,
+  MlBubbleDetectorError,
+  SyntheticYoloSession,
+  YoloBubbleProposalProvider,
+  boundsToPolygon,
+  createOnnxYoloSession,
+  decodeYoloV5,
+  decodeYoloV8,
+  letterboxToTensor,
+  nonMaxSuppression,
+} from './ml-bubble-detector.js';
+export type {
+  ComicBubbleClass,
+  LetterboxResult,
+  OnnxYoloSessionOptions,
+  YoloBubbleProposalProviderOptions,
+  YoloDetection,
+  YoloInferenceSession,
+} from './ml-bubble-detector.js';
+export {
   CaptionSafeRegionEngine,
   CaptionSafeRegionError,
 } from './safe-region.js';
@@ -94,6 +132,18 @@ export type {
   CaptionSafeRegionInput,
   CaptionSafeRegionResult,
 } from './safe-region.js';
+export {
+  deriveReadingOrder,
+  detectPanels,
+  PanelOrderError,
+} from './panel-order.js';
+export type {
+  Panel,
+  PanelDetectionOptions,
+  PanelDetectionResult,
+  ReadingDirection,
+  ReadingOrderBubbleInput,
+} from './panel-order.js';
 
 interface Component {
   readonly id: number;

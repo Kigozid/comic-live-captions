@@ -6,6 +6,16 @@ import type { ImageSpace, Point, Polygon } from '@comic-captioner/shared';
 import type { CaptionSafeRegion } from '@comic-captioner/bubble-engine';
 
 export { TimelineEngine, TimelineError } from './timeline.js';
+export { proposePagePacing, PagePacingError } from './page-pacing.js';
+export type {
+  PageDialogueSegmentRef,
+  PagePacingInput,
+  PagePacingOverride,
+  PagePacingProposal,
+  PagePacingReason,
+  PagePacingSignal,
+  PacedPageInput,
+} from './page-pacing.js';
 
 export interface CaptionFontMetrics {
   readonly family: string;

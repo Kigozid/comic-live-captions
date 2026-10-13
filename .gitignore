@@ -6,3 +6,6 @@ coverage/
 .env
 .env.*
 !.env.example
+models/
+*.onnx
+.DS_Store

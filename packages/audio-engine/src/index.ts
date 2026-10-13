@@ -15,6 +15,37 @@ export type {
   TranscriptionServiceOptions,
   WordTimestamp,
 } from './transcription.js';
+export {
+  ForcedAlignmentError,
+  alignWords,
+  chunkCaptionUnits,
+} from './forced-alignment.js';
+export type {
+  AlignmentSegmentInput,
+  AlignmentWordInput,
+  CaptionChunk,
+  CaptionChunkOptions,
+  EnergyEnvelope,
+  ForcedAlignmentInput,
+  ForcedAlignmentOptions,
+} from './forced-alignment.js';
+export {
+  ForcedAlignAcousticError,
+  SyntheticCtcPosteriorsProvider,
+  alignWordsAcoustic,
+  tokenizeWords,
+  viterbiAlign,
+} from './wav2vec2-alignment.js';
+export type {
+  AlignedTokenSpan,
+  CtcAlignment,
+  CtcFramePosteriors,
+  CtcFramePosteriorsProvider,
+  ForcedAlignAcousticInput,
+  ForcedAlignAcousticResult,
+  ForcedAlignTokenMode,
+  TokenizedWords,
+} from './wav2vec2-alignment.js';
 
 export const SUPPORTED_AUDIO_FORMATS = [
   'mp3',

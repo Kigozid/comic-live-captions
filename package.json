@@ -18,7 +18,8 @@
     "benchmark:ocr": "node --import tsx scripts/benchmark-ocr.mjs",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml}\""
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml}\"",
+    "models:fetch": "node scripts/fetch-models.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
@@ -30,6 +31,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.4.0",
+    "onnxruntime-node": "^1.30.0",
     "prettier": "^3.6.2",
     "sharp": "^0.34.4",
     "tsx": "^4.20.5",

@@ -11,13 +11,15 @@ import type {
   ExportBubble,
   ExportCaption,
 } from '../../../packages/rendering/src/validation.js';
+import { resolveMp4Dimensions } from '../../../packages/rendering/src/frame-renderer.js';
 
-export type Mp4Resolution = '720p' | '1080p' | 'custom';
-export interface Mp4ExportOptions {
-  readonly resolution: Mp4Resolution;
-  readonly width?: number;
-  readonly height?: number;
-}
+export { resolveMp4Dimensions };
+export type {
+  Mp4ExportOptions,
+  Mp4Resolution,
+} from '../../../packages/rendering/src/frame-renderer.js';
+import type { Mp4ExportOptions } from '../../../packages/rendering/src/frame-renderer.js';
+
 export interface Mp4ExportProgress {
   readonly percent: number;
   readonly currentTime: number;
@@ -28,30 +30,6 @@ type CapturableAudioElement = HTMLAudioElement & {
   captureStream?: () => MediaStream;
   mozCaptureStream?: () => MediaStream;
 };
-
-export function resolveMp4Dimensions(options: Mp4ExportOptions): {
-  readonly width: number;
-  readonly height: number;
-} {
-  if (options.resolution === '720p') return { width: 1280, height: 720 };
-  if (options.resolution === '1080p') return { width: 1920, height: 1080 };
-  const { width = 0, height = 0 } = options;
-  if (
-    !Number.isSafeInteger(width) ||
-    !Number.isSafeInteger(height) ||
-    width < 16 ||
-    height < 16 ||
-    width > 7680 ||
-    height > 7680
-  )
-    throw new RangeError(
-      'Custom video dimensions must be whole numbers between 16 and 7680 pixels.',
-    );
-  return {
-    width: Math.round(width / 2) * 2,
-    height: Math.round(height / 2) * 2,
-  };
-}
 
 /** Record the preview's shared SVG caption primitive against the source audio clock. */
 export async function exportMp4(
@@ -293,4 +271,168 @@ export async function exportMp4(
   if (!chunks.length) throw new Error('MP4 export produced no encoded data.');
   onProgress({ percent: 100, currentTime: duration, duration });
   return new Blob(chunks, { type: 'video/mp4' });
+}
+
+const SERVER_EXPORT_FPS = 30;
+
+const audioExtensions: Readonly<Record<string, string>> = {
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/flac': 'flac',
+  'audio/x-flac': 'flac',
+};
+
+function audioFormatFromBlob(audioAsset: Blob): string {
+  const mime = audioAsset.type.toLowerCase().split(';')[0]!.trim();
+  return audioExtensions[mime] ?? 'bin';
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize)
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + chunkSize),
+    );
+  return btoa(binary);
+}
+
+function readAudioDuration(audioAsset: Blob, signal: AbortSignal): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const audio = document.createElement('audio');
+    const url = URL.createObjectURL(audioAsset);
+    const cleanup = () => {
+      audio.removeEventListener('loadedmetadata', onMetadata);
+      audio.removeEventListener('error', onError);
+      signal.removeEventListener('abort', onCancel);
+      URL.revokeObjectURL(url);
+      audio.removeAttribute('src');
+      audio.load();
+    };
+    const onMetadata = () => {
+      const duration = audio.duration;
+      cleanup();
+      resolve(duration);
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Audio asset could not be decoded for export.'));
+    };
+    const onCancel = () => {
+      cleanup();
+      reject(new DOMException('Export cancelled.', 'AbortError'));
+    };
+    audio.preload = 'auto';
+    audio.addEventListener('loadedmetadata', onMetadata, { once: true });
+    audio.addEventListener('error', onError, { once: true });
+    signal.addEventListener('abort', onCancel, { once: true });
+    audio.src = url;
+    audio.load();
+  });
+}
+
+/**
+ * Server-side export: the API renders deterministic frames and encodes them
+ * with FFmpeg. When the API is unreachable or cannot encode (for example
+ * FFMPEG_MISSING), falls back to the real-time captureStream path.
+ */
+export async function exportMp4ViaServer(
+  cleanedComic: Blob,
+  audioAsset: Blob,
+  captions: readonly ExportCaption[],
+  bubbles: readonly ExportBubble[],
+  options: Mp4ExportOptions,
+  signal: AbortSignal,
+  onProgress: (progress: Mp4ExportProgress) => void,
+): Promise<Blob> {
+  const validation = validateFrameExport(captions, bubbles);
+  if (!validation.valid)
+    throw new Error(
+      `Export validation failed: ${validation.issues.map((issue) => `${issue.captionId}: ${issue.code}`).join(', ')}`,
+    );
+  let durationSeconds: number;
+  try {
+    durationSeconds = await readAudioDuration(audioAsset, signal);
+  } catch (cause) {
+    if (
+      signal.aborted ||
+      (cause instanceof DOMException && cause.name === 'AbortError')
+    )
+      throw cause;
+    return exportMp4(
+      cleanedComic,
+      audioAsset,
+      captions,
+      bubbles,
+      options,
+      signal,
+      onProgress,
+    );
+  }
+  if (captions.some((caption) => caption.end! > durationSeconds))
+    throw new Error(
+      'Export validation failed: one or more dialogue timings extend past the audio duration.',
+    );
+  try {
+    onProgress({ percent: 5, currentTime: 0, duration: durationSeconds });
+    const response = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        pageImage: toBase64(new Uint8Array(await cleanedComic.arrayBuffer())),
+        audio: toBase64(new Uint8Array(await audioAsset.arrayBuffer())),
+        audioFormat: audioFormatFromBlob(audioAsset),
+        fps: SERVER_EXPORT_FPS,
+        durationSeconds,
+        resolution: options,
+        captions,
+        bubbles,
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => null);
+      const message =
+        payload &&
+        typeof payload === 'object' &&
+        'error' in payload &&
+        payload.error &&
+        typeof payload.error === 'object' &&
+        'message' in payload.error &&
+        typeof payload.error.message === 'string'
+          ? payload.error.message
+          : `Server-side MP4 export failed (${response.status}).`;
+      throw new Error(message);
+    }
+    const mp4 = await response.arrayBuffer();
+    if (!mp4.byteLength)
+      throw new Error('Server-side MP4 export produced no encoded data.');
+    onProgress({
+      percent: 100,
+      currentTime: durationSeconds,
+      duration: durationSeconds,
+    });
+    return new Blob([mp4], { type: 'video/mp4' });
+  } catch (cause) {
+    if (
+      signal.aborted ||
+      (cause instanceof DOMException && cause.name === 'AbortError')
+    )
+      throw cause;
+    return exportMp4(
+      cleanedComic,
+      audioAsset,
+      captions,
+      bubbles,
+      options,
+      signal,
+      onProgress,
+    );
+  }
 }

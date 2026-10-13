@@ -2,12 +2,14 @@ import { DialogueMappingEngine } from '../../../packages/ai/src/dialogue-mapping
 import type { DialogueMapping } from '@comic-captioner/core';
 import type { Transcript } from '@comic-captioner/audio-engine';
 import type { BubbleDialogueReference } from '@comic-captioner/core';
+import type { BubbleId } from '@comic-captioner/shared';
 import type { EditorDocument } from './editor-model.js';
 
 /** Builds fresh deterministic, review-only mappings from edited OCR and transcript data. */
 export function proposeTranscriptBubbleMappings(
   document: EditorDocument | null,
   transcript: Transcript | null,
+  readingOrder?: readonly string[] | null,
 ): readonly DialogueMapping[] {
   if (!document || !transcript?.segments.length) return [];
   const references: BubbleDialogueReference[] = document.order.flatMap(
@@ -43,9 +45,18 @@ export function proposeTranscriptBubbleMappings(
     },
   );
   if (!references.length) return [];
+  const referenceIds = references.map((ref) => ref.bubbleId);
+  // Prefer explicit panel reading order when it covers every bubble;
+  // otherwise fall back to document order. Content match stays primary.
+  const orderedIds =
+    readingOrder &&
+    readingOrder.length === references.length &&
+    referenceIds.every((id) => readingOrder.includes(id))
+      ? (readingOrder as BubbleId[])
+      : (referenceIds as BubbleId[]);
   return new DialogueMappingEngine().map({
     bubbleReferences: references,
-    readingOrder: references.map((reference) => reference.bubbleId),
+    readingOrder: orderedIds,
     transcriptSegments: transcript.segments,
   }).mappings;
 }

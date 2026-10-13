@@ -13,6 +13,12 @@ export const VISUAL_REFERENCE_DIRECTORY = path.resolve(
   'tests/fixtures/visual-regression/caption-renderer/references',
 );
 
+/** Manifest of approved font-independent caption structure, beside the PNGs. */
+export const VISUAL_APPROVED_STRUCTURE_PATH = path.resolve(
+  process.cwd(),
+  'tests/fixtures/visual-regression/caption-renderer/approved-structure.json',
+);
+
 export async function renderCaptionVisualCase(caseId: string) {
   const testCase = CAPTION_VISUAL_CASES.find(
     (candidate) => candidate.id === caseId,
@@ -33,10 +39,17 @@ export async function renderCaptionVisualCase(caseId: string) {
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
+  const cleaned = await sharp(page)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
   return {
     output,
     width: decoded.info.width,
     height: decoded.info.height,
     rgba: decoded.data,
+    cleanedRgba: cleaned.data,
+    layouts,
+    truth,
   };
 }

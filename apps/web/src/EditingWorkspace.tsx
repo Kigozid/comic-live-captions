@@ -11,6 +11,13 @@ import type { AssistProposal, AssistTask } from './assist-client.js';
 import { proposeTranscriptBubbleMappings } from './dialogue-review.js';
 import { BubbleGeometryError, unionBubblePolygons } from './bubble-geometry.js';
 import { associateOCRLine } from './ocr-association.js';
+import {
+  buildReviewQueue,
+  candidatesFromBubbles,
+  candidatesFromMappings,
+  candidatesFromObservations,
+} from './review-queue.js';
+import { mapReviewHotkey, type ReviewAction } from './review-hotkeys.js';
 
 interface AssetView {
   readonly metadata: SourceImageMetadata;
@@ -45,6 +52,7 @@ export function EditingWorkspace({
   onAutomateSpeech,
   speechAutomationBusy = false,
   speechAutomationReady = false,
+  readingOrder = null,
   transcript,
   initialDocument,
   analysis,
@@ -68,6 +76,7 @@ export function EditingWorkspace({
   readonly onAutomateSpeech?: () => void;
   readonly speechAutomationBusy?: boolean;
   readonly speechAutomationReady?: boolean;
+  readonly readingOrder?: readonly string[] | null;
   readonly transcript?: Transcript | null;
   readonly initialDocument?: EditorDocument | null;
   readonly analysis?: {
@@ -125,6 +134,7 @@ export function EditingWorkspace({
   const [selectedLooseOcrId, setSelectedLooseOcrId] = useState<string | null>(
     null,
   );
+  const [reviewCursor, setReviewCursor] = useState(0);
   const [bubbleEditError, setBubbleEditError] = useState<string | null>(null);
   const [showDetection, setShowDetection] = useState(true);
   const [canvasMode, setCanvasMode] = useState<'select' | 'bubble'>('select');
@@ -236,6 +246,41 @@ export function EditingWorkspace({
     ...Object.values(document?.dialogues ?? {}).map((dialogue) => dialogue.end),
   );
 
+  // Confidence-sorted review queue: only uncertain items need attention.
+  const reviewQueue = useMemo(() => {
+    if (!document) return null;
+    const observations = Object.values(document.observations ?? {});
+    const bubbles = Object.values(document.bubbles ?? {});
+    const mappings =
+      mappingProposals.length > 0
+        ? mappingProposals
+        : proposeTranscriptBubbleMappings(
+            document,
+            transcript ?? null,
+            readingOrder,
+          );
+    return buildReviewQueue(
+      [
+        ...candidatesFromObservations(observations),
+        ...candidatesFromBubbles(
+          bubbles.map((bubble) => ({
+            id: bubble.id,
+            kind: bubble.kind,
+            ...(bubble.confidence !== undefined
+              ? { confidence: bubble.confidence }
+              : {}),
+            ...(bubble.classificationConfidence !== undefined
+              ? { classificationConfidence: bubble.classificationConfidence }
+              : {}),
+            ...(bubble.reviewStatus ? { reviewStatus: bubble.reviewStatus } : {}),
+          })),
+        ),
+        ...candidatesFromMappings(mappings),
+      ],
+      { confidenceThreshold: 0.85, maxItems: 40 },
+    );
+  }, [document, mappingProposals, transcript, readingOrder]);
+
   useEffect(() => {
     function handleEditorShortcut(event: KeyboardEvent) {
       const target = event.target;
@@ -243,33 +288,121 @@ export function EditingWorkspace({
         target instanceof HTMLElement &&
         (target.isContentEditable ||
           ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-      if (isEditingText) return;
-      const command = event.metaKey || event.ctrlKey;
-      if (!command && event.key.toLowerCase() === 'v') {
-        setCanvasMode('select');
-      } else if (!command && event.key.toLowerCase() === 'b') {
-        setCanvasMode('bubble');
-      } else if (command && event.key.toLowerCase() === 'z') {
-        event.preventDefault();
-        dispatch({ type: event.shiftKey ? 'redo' : 'undo' });
-      } else if (event.code === 'Space') {
-        event.preventDefault();
-        onAudioToggle?.();
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        onAudioSeek?.(Math.max(0, (audioClock?.positionSeconds ?? 0) - 1 / 30));
-      } else if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        onAudioSeek?.(
-          Math.min(timelineEnd, (audioClock?.positionSeconds ?? 0) + 1 / 30),
-        );
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        onAudioSeek?.(0);
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        onAudioSeek?.(audioClock?.durationSeconds ?? timelineEnd);
-      }
+      const action = mapReviewHotkey({
+        key: event.key,
+        ...(event.code ? { code: event.code } : {}),
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        isEditingText,
+      });
+      if (!action) return;
+
+      const applyReviewAction = (reviewAction: ReviewAction) => {
+        switch (reviewAction.type) {
+          case 'undo':
+            event.preventDefault();
+            dispatch({ type: 'undo' });
+            break;
+          case 'redo':
+            event.preventDefault();
+            dispatch({ type: 'redo' });
+            break;
+          case 'toggle-play':
+            event.preventDefault();
+            onAudioToggle?.();
+            break;
+          case 'seek-back':
+            event.preventDefault();
+            onAudioSeek?.(
+              Math.max(0, (audioClock?.positionSeconds ?? 0) - 1 / 30),
+            );
+            break;
+          case 'seek-forward':
+            event.preventDefault();
+            onAudioSeek?.(
+              Math.min(timelineEnd, (audioClock?.positionSeconds ?? 0) + 1 / 30),
+            );
+            break;
+          case 'seek-start':
+            event.preventDefault();
+            onAudioSeek?.(0);
+            break;
+          case 'seek-end':
+            event.preventDefault();
+            onAudioSeek?.(audioClock?.durationSeconds ?? timelineEnd);
+            break;
+          case 'mode-select':
+            setCanvasMode('select');
+            break;
+          case 'mode-bubble':
+            setCanvasMode('bubble');
+            break;
+          case 'next':
+          case 'previous':
+          case 'accept':
+          case 'reject':
+          case 'edit':
+          case 'select-alternative': {
+            event.preventDefault();
+            const items = reviewQueue?.items ?? [];
+            if (!items.length) return;
+            if (reviewAction.type === 'next') {
+              setReviewCursor((index) =>
+                Math.min(items.length - 1, index + 1),
+              );
+              return;
+            }
+            if (reviewAction.type === 'previous') {
+              setReviewCursor((index) => Math.max(0, index - 1));
+              return;
+            }
+            const item = items[Math.min(reviewCursor, items.length - 1)];
+            if (!item) return;
+            if (item.kind === 'bubble' && item.targetId) {
+              setSelectedBubbleId(item.targetId);
+            } else if (item.bubbleId) {
+              setSelectedBubbleId(String(item.bubbleId));
+            }
+            if (reviewAction.type === 'accept') {
+              if (item.kind === 'bubble') {
+                dispatch({
+                  type: 'review-bubble',
+                  bubbleId: item.targetId,
+                  reviewStatus: 'accepted',
+                });
+              } else if (item.kind === 'ocr-line') {
+                dispatch({
+                  type: 'review-ocr-observation',
+                  observationId: item.targetId,
+                  classification: 'dialogue',
+                  reviewStatus: 'accepted',
+                  ...(item.bubbleId
+                    ? { bubbleId: String(item.bubbleId) }
+                    : {}),
+                });
+              }
+              setReviewCursor((index) =>
+                Math.min(items.length - 1, index + 1),
+              );
+            } else if (reviewAction.type === 'reject') {
+              if (item.kind === 'bubble') {
+                dispatch({
+                  type: 'review-bubble',
+                  bubbleId: item.targetId,
+                  reviewStatus: 'rejected',
+                });
+              }
+              setReviewCursor((index) =>
+                Math.min(items.length - 1, index + 1),
+              );
+            }
+            break;
+          }
+        }
+      };
+      applyReviewAction(action);
     }
     window.addEventListener('keydown', handleEditorShortcut);
     return () => window.removeEventListener('keydown', handleEditorShortcut);
@@ -279,6 +412,8 @@ export function EditingWorkspace({
     onAudioSeek,
     onAudioToggle,
     timelineEnd,
+    reviewQueue,
+    reviewCursor,
   ]);
 
   function commit(action: Parameters<typeof dispatch>[0]) {
@@ -427,7 +562,9 @@ export function EditingWorkspace({
 
   function proposeTranscriptMappings() {
     if (!document || !transcript) return;
-    setMappingProposals(proposeTranscriptBubbleMappings(document, transcript));
+    setMappingProposals(
+      proposeTranscriptBubbleMappings(document, transcript, readingOrder),
+    );
   }
 
   function approveMapping(mapping: DialogueMapping) {
@@ -637,9 +774,11 @@ export function EditingWorkspace({
               }
               onClick={onAutomateSpeech}
               type="button"
-              title="Generate a transcript from the imported audio if needed, then find bubble matches and fit captions for review"
+              title="Run the full pipeline (detect → OCR → transcribe → map → fit → timeline) and open the confidence-sorted review queue"
             >
-              {speechAutomationBusy ? 'Automating speech…' : 'Automate speech'}
+              {speechAutomationBusy
+                ? 'Running auto pipeline…'
+                : 'Auto everything'}
             </button>
           )}
           {transcript && (
@@ -665,8 +804,75 @@ export function EditingWorkspace({
           >
             Redo
           </button>
+          <span
+            className="hidden self-center text-xs text-stone-500 lg:inline"
+            title="Enter/A accept · J/K or ↑/↓ next/prev · E edit · Space play · ⌘Z undo · ⌘⇧Z redo · 1–9 alternatives"
+          >
+            J/K navigate · A accept · E edit
+          </span>
         </div>
       </header>
+      {reviewQueue && reviewQueue.items.length > 0 && (
+        <section
+          aria-label="Confidence-sorted review queue"
+          className="border-b border-indigo-200 bg-indigo-50 px-4 py-3"
+        >
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm font-semibold">
+            <span>
+              Review queue · {reviewQueue.summary.queued} uncertain item
+              {reviewQueue.summary.queued === 1 ? '' : 's'}
+            </span>
+            <span className="font-normal text-indigo-800">
+              {reviewQueue.summary.critical} critical ·{' '}
+              {reviewQueue.summary.high} high · {reviewQueue.summary.normal}{' '}
+              normal · avg{' '}
+              {Math.round(reviewQueue.summary.averageQueuedConfidence * 100)}%
+            </span>
+          </div>
+          <div className="max-h-40 space-y-1 overflow-y-auto">
+            {reviewQueue.items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="flex w-full items-start gap-2 rounded border border-indigo-100 bg-white px-2 py-1 text-left text-xs hover:border-indigo-300"
+                onClick={() => {
+                  if (item.kind === 'bubble' && item.targetId) {
+                    setSelectedBubbleId(item.targetId);
+                  } else if (item.kind === 'ocr-line' && item.bubbleId) {
+                    setSelectedBubbleId(String(item.bubbleId));
+                  }
+                }}
+              >
+                <span
+                  className={
+                    item.priority === 'critical'
+                      ? 'font-semibold text-red-700'
+                      : item.priority === 'high'
+                        ? 'font-semibold text-amber-700'
+                        : 'text-stone-600'
+                  }
+                >
+                  {Math.round(item.confidence * 100)}%
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium">{item.label}</span>
+                  {item.detail ? (
+                    <span className="block truncate text-stone-600">
+                      {item.detail}
+                    </span>
+                  ) : null}
+                  <span className="block text-stone-500">{item.reason}</span>
+                </span>
+                {item.suggestedFix ? (
+                  <span className="shrink-0 text-indigo-700">
+                    {item.suggestedFix}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       {mappingProposals.length > 0 && (
         <section
           aria-label="Dialogue match proposals"
@@ -1148,6 +1354,10 @@ export function EditingWorkspace({
                           type: 'edit-loose-ocr',
                           observationId: selectedLooseOCR.id,
                           text: event.currentTarget.value,
+                          coalesce: {
+                            key: `loose-ocr:${selectedLooseOCR.id}`,
+                            atMs: Date.now(),
+                          },
                         })
                       }
                     />
@@ -1424,6 +1634,10 @@ export function EditingWorkspace({
                       type: 'edit-ocr',
                       bubbleId: selectedBubble.id,
                       text: event.currentTarget.value,
+                      coalesce: {
+                        key: `ocr:${selectedBubble.id}`,
+                        atMs: Date.now(),
+                      },
                     })
                   }
                 />
@@ -1456,6 +1670,10 @@ export function EditingWorkspace({
                       type: 'edit-dialogue',
                       dialogueId: selectedDialogue.id,
                       patch: { caption: event.currentTarget.value },
+                      coalesce: {
+                        key: `caption:${selectedDialogue.id}`,
+                        atMs: Date.now(),
+                      },
                     })
                   }
                 />

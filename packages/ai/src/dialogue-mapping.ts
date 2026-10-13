@@ -36,6 +36,12 @@ export interface DialogueMappingOptions {
   readonly confidentMappingThreshold?: number;
   readonly ambiguityMargin?: number;
   readonly maximumAlternatives?: number;
+  /**
+   * When the best and runner-up content scores are within this margin,
+   * order/spatial/speaker signals act as tiebreakers. Content match remains
+   * the primary signal whenever scores clearly separate.
+   */
+  readonly contentTieMargin?: number;
 }
 
 export interface DialogueMappingResult {
@@ -55,15 +61,22 @@ const DEFAULTS: Required<DialogueMappingOptions> = {
   confidentMappingThreshold: 0.76,
   ambiguityMargin: 0.12,
   maximumAlternatives: 3,
+  contentTieMargin: 0.08,
 };
 
+/**
+ * Content match (OCR text ↔ transcript) is the primary signal. Reading order
+ * is only a tiebreaker when content scores are close. This stays fully
+ * deterministic and works offline — critical when the audio is a dub of the
+ * same script.
+ */
 const BASE_WEIGHTS = {
-  text: 0.42,
-  semantic: 0.2,
-  reading: 0.16,
-  temporal: 0.08,
-  speaker: 0.08,
-  spatial: 0.06,
+  text: 0.58,
+  semantic: 0.18,
+  reading: 0.07,
+  temporal: 0.06,
+  speaker: 0.06,
+  spatial: 0.05,
 } as const;
 
 /** Deterministic dialogue-to-bubble proposal engine. It never accepts proposals. */
@@ -127,12 +140,20 @@ export class DialogueMappingEngine {
           });
           return { bubbleId, index, reference, ...scores };
         })
-        .sort(
-          (a, b) =>
-            b.confidence - a.confidence ||
+        .sort((a, b) => {
+          // Content match is primary. When confidences are close, prefer the
+          // stronger content score; reading order is only the final tiebreaker.
+          const confidenceDelta = b.confidence - a.confidence;
+          if (Math.abs(confidenceDelta) > 1e-9) return confidenceDelta;
+          const contentDelta = b.contentScore - a.contentScore;
+          if (Math.abs(contentDelta) > config.contentTieMargin) {
+            return contentDelta;
+          }
+          return (
             a.index - b.index ||
-            String(a.bubbleId).localeCompare(String(b.bubbleId)),
-        );
+            String(a.bubbleId).localeCompare(String(b.bubbleId))
+          );
+        });
 
       const winner = candidates[0];
       const runnerUp = candidates[1];
@@ -218,6 +239,7 @@ function scoreCandidate(input: {
 }): {
   readonly confidence: number;
   readonly textScore: number;
+  readonly contentScore: number;
   readonly semanticScore?: number;
   readonly reasons: readonly DialogueMappingReason[];
 } {
@@ -237,14 +259,28 @@ function scoreCandidate(input: {
       textScore,
       textScore >= 0.99
         ? 'Transcript text matches the OCR dialogue.'
-        : `Normalized text overlap is ${Math.round(textScore * 100)}%.`,
+        : textScore >= 0.7
+          ? `OCR dialogue closely matches the transcript (${Math.round(textScore * 100)}% content similarity).`
+          : `Normalized content similarity is ${Math.round(textScore * 100)}%.`,
     ),
     reason(
       'reading-order',
       readingScore,
-      `Transcript turn ${input.segmentIndex + 1} is compared with page reading position ${input.readingIndex + 1}.`,
+      `Reading order is a tiebreaker: transcript turn ${input.segmentIndex + 1} vs page position ${input.readingIndex + 1}.`,
     ),
   ];
+
+  // Content score is text + optional semantic evidence. It is the primary
+  // mapping signal; order/spatial/speaker only adjust when content is close.
+  const semanticScore = input.semantic?.score;
+  const contentScore =
+    semanticScore === undefined
+      ? textScore
+      : clamp(
+          (textScore * BASE_WEIGHTS.text +
+            semanticScore * BASE_WEIGHTS.semantic) /
+            (BASE_WEIGHTS.text + BASE_WEIGHTS.semantic),
+        );
 
   let weightedScore =
     textScore * BASE_WEIGHTS.text + readingScore * BASE_WEIGHTS.reading;
@@ -340,20 +376,31 @@ function scoreCandidate(input: {
   return {
     confidence: clamp(weightedScore / totalWeight),
     textScore,
+    contentScore,
     ...(input.semantic ? { semanticScore: input.semantic.score } : {}),
     reasons: Object.freeze(reasons),
   };
 }
 
+/**
+ * Content similarity between transcript text and OCR dialogue text.
+ * Combines token Dice, character n-gram Dice, and normalized Levenshtein
+ * edit distance so OCR noise and light dub paraphrases still match.
+ */
 function textSimilarity(left: string, right: string): number {
   const a = normalizeTokens(left);
   const b = normalizeTokens(right);
+  if (a.length === 0 && b.length === 0) return 1;
   if (a.length === 0 || b.length === 0) return 0;
-  if (a.join(' ') === b.join(' ')) return 1;
+  const joinedA = a.join(' ');
+  const joinedB = b.join(' ');
+  if (joinedA === joinedB) return 1;
+
   const aSet = new Set(a);
   const bSet = new Set(b);
   const intersection = [...aSet].filter((token) => bSet.has(token)).length;
   const tokenDice = (2 * intersection) / (aSet.size + bSet.size);
+
   const compactA = a.join('');
   const compactB = b.join('');
   const ngramsA = characterNgrams(compactA, 3);
@@ -365,7 +412,49 @@ function textSimilarity(left: string, right: string): number {
     ngramsA.size + ngramsB.size === 0
       ? Number(compactA === compactB)
       : (2 * ngramIntersection) / (ngramsA.size + ngramsB.size);
-  return clamp(tokenDice * 0.65 + ngramDice * 0.35);
+
+  const editScore = normalizedEditSimilarity(joinedA, joinedB);
+  // Token overlap dominates; edit distance catches OCR typos and light
+  // paraphrases that token sets miss (word order / inflection noise).
+  return clamp(tokenDice * 0.48 + ngramDice * 0.22 + editScore * 0.3);
+}
+
+/** 1 - normalized Levenshtein distance, with cheap early exits. */
+function normalizedEditSimilarity(left: string, right: string): number {
+  if (left === right) return 1;
+  const maxLen = Math.max(left.length, right.length);
+  if (maxLen === 0) return 1;
+  // Bound work for long strings; comic dialogue is short so this rarely trips.
+  const a = left.length > 256 ? left.slice(0, 256) : left;
+  const b = right.length > 256 ? right.slice(0, 256) : right;
+  const boundedMax = Math.max(a.length, b.length);
+  if (boundedMax === 0) return 1;
+  const distance = levenshteinDistance(a, b);
+  return clamp(1 - distance / boundedMax);
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) return 0;
+  if (left.length === 0) return right.length;
+  if (right.length === 0) return left.length;
+  let previous = new Array<number>(right.length + 1);
+  let current = new Array<number>(right.length + 1);
+  for (let j = 0; j <= right.length; j += 1) previous[j] = j;
+  for (let i = 1; i <= left.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left.charCodeAt(i - 1) === right.charCodeAt(j - 1) ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1]! + 1,
+        previous[j]! + 1,
+        previous[j - 1]! + cost,
+      );
+    }
+    const swap = previous;
+    previous = current;
+    current = swap;
+  }
+  return previous[right.length]!;
 }
 
 function normalizeTokens(value: string): string[] {
@@ -568,6 +657,7 @@ function validateOptions(
     !validScore(config.minimumConfidence) ||
     !validScore(config.confidentMappingThreshold) ||
     !validScore(config.ambiguityMargin) ||
+    !validScore(config.contentTieMargin) ||
     !Number.isInteger(config.maximumAlternatives) ||
     config.maximumAlternatives < 1 ||
     config.maximumAlternatives > 20
