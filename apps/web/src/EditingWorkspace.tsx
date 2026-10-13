@@ -768,7 +768,7 @@ export function EditingWorkspace({
               disabled={
                 speechAutomationBusy ||
                 !speechAutomationReady ||
-                !cleaned ||
+                (!cleaned && !original) ||
                 !audioAsset ||
                 !transcript
               }

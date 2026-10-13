@@ -44,6 +44,7 @@ import {
   autoCleanPage,
   detectBubblesHybrid,
   detectPanelsAndOrder,
+  needsAutoClean,
   rasterFromImageSource,
   rasterToPngBlob,
   triageOcrDocument,
@@ -698,6 +699,12 @@ export function App() {
         return { ...previous, [role]: URL.createObjectURL(file) };
       });
       setSourceBlobs((previous) => ({ ...previous, [role]: file }));
+      // Original-only workflow: synthesize a cleaned page immediately so the
+      // user never has to hand-prep one. A later hand-imported cleaned page
+      // still overrides this result.
+      if (role === 'original' && needsAutoClean(result.pair)) {
+        void ensureCleanedPage({ file, metadata: result.image });
+      }
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -714,10 +721,13 @@ export function App() {
    * hand-preparing a cleaned page. The original+cleaned path stays available
    * as a pro override.
    */
-  async function autoCleanFromOriginal() {
-    const file = sourceBlobs.original;
-    const metadata = pair.original;
-    if (!file || !metadata) return;
+  async function autoCleanFromOriginal(overrides?: {
+    readonly file?: File;
+    readonly metadata?: SourceImageMetadata;
+  }): Promise<boolean> {
+    const file = overrides?.file ?? sourceBlobs.original;
+    const metadata = overrides?.metadata ?? pair.original;
+    if (!file || !metadata) return false;
     setAutoCleanBusy(true);
     setError(null);
     try {
@@ -809,15 +819,33 @@ export function App() {
       setProjectMessage(
         `Auto-clean erased ${result.erasedPixelCount.toLocaleString()} text pixels across ${result.masks.length} bubble region(s). Review the cleaned page, or import a hand-prepared cleaned page to override.`,
       );
+      return true;
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
           : 'Auto-clean failed. Import a cleaned page manually instead.',
       );
+      return false;
     } finally {
       setAutoCleanBusy(false);
     }
+  }
+
+  /**
+   * Guarantee a cleaned page exists. If the user only imported the original,
+   * auto-inpaint synthesizes one so the rest of the pipeline (scan, map,
+   * export) does not require a hand-prepared cleaned page.
+   */
+  async function ensureCleanedPage(overrides?: {
+    readonly file?: File;
+    readonly metadata?: SourceImageMetadata;
+  }): Promise<boolean> {
+    if (overrides?.file && overrides?.metadata) {
+      return autoCleanFromOriginal(overrides);
+    }
+    if (!needsAutoClean(pair)) return Boolean(pair.cleaned || pair.original);
+    return autoCleanFromOriginal();
   }
 
   async function loadAlignmentImages() {
@@ -1316,12 +1344,20 @@ export function App() {
   }
 
   async function automateSpeech() {
-    if (!alignment || !sourceBlobs.original || !sourceBlobs.cleaned) return;
+    if (!pair.original && !pair.cleaned) return;
+    if (!sourceBlobs.original && !sourceBlobs.cleaned) return;
     setSpeechAutomationBusy(true);
     setError(null);
     setSpeechProposals(null);
     setSpeechAutomationWarning(null);
     try {
+      // Original-only workflow: synthesize a cleaned page when needed.
+      const cleanedReady = await ensureCleanedPage();
+      if (!cleanedReady) {
+        throw new Error(
+          'Auto-clean could not prepare a cleaned page. Import one manually to continue.',
+        );
+      }
       await ensureAutomationApiSession();
       const pageOCR = ocrDocument ?? (await requestPageAnalysis());
       const transcript =
@@ -1363,15 +1399,18 @@ export function App() {
   }
 
   async function ensureAutomationApiSession() {
-    if (
-      !pair.original ||
-      !pair.cleaned ||
-      !sourceBlobs.original ||
-      !sourceBlobs.cleaned
-    )
-      throw new Error(
-        'Both comic page files are required. Reimport the original and cleaned pages, then align them.',
-      );
+    if (!pair.original && !pair.cleaned)
+      throw new Error('Import a comic page before running speech automation.');
+    if (!sourceBlobs.original && !sourceBlobs.cleaned)
+      throw new Error('Import a comic page before running speech automation.');
+    // Prefer a cleaned page (auto-inpaint when only the original is present).
+    if (!pair.cleaned || !sourceBlobs.cleaned) {
+      const cleanedReady = await ensureCleanedPage();
+      if (!cleanedReady || !pair.cleaned || !sourceBlobs.cleaned)
+        throw new Error(
+          'Auto-clean could not prepare a cleaned page. Import the original and cleaned pages, then try again.',
+        );
+    }
     const imageResponse = await fetch('/api/images');
     if (!imageResponse.ok)
       throw new Error(
@@ -1379,6 +1418,8 @@ export function App() {
       );
     const currentImages = (await imageResponse.json()) as ImagePair;
     const serverHasPair =
+      pair.original != null &&
+      pair.cleaned != null &&
       currentImages.original?.sha256 === pair.original.sha256 &&
       currentImages.cleaned?.sha256 === pair.cleaned.sha256;
     if (!serverHasPair) {
@@ -1813,10 +1854,20 @@ export function App() {
   }
 
   async function exportVideo() {
+    // Original-only export: auto-inpaint so captions sit on clean art.
+    if (needsAutoClean(pair)) {
+      const cleanedReady = await ensureCleanedPage();
+      if (!cleanedReady) {
+        setProjectMessage(
+          'Auto-clean failed. Import a cleaned page or retry auto-clean before export.',
+        );
+        return;
+      }
+    }
     const pageBlob = sourceBlobs.cleaned ?? sourceBlobs.original;
     if (!pageBlob || !audioSource?.blob) {
       setProjectMessage(
-        'MP4 export needs a comic page (cleaned or original) and audio.',
+        'MP4 export needs a comic page (original or cleaned) and audio.',
       );
       return;
     }
@@ -2193,7 +2244,10 @@ export function App() {
               <button
                 className="editor-button"
                 disabled={
-                  !pair.cleaned || !audioSource?.blob || !editorDocument
+                  (!pair.original && !pair.cleaned) ||
+                  !audioSource?.blob ||
+                  !editorDocument ||
+                  autoCleanBusy
                 }
                 onClick={() => void exportVideo()}
                 type="button"
@@ -2298,7 +2352,7 @@ export function App() {
             </button>
             <ImageUploadControl
               busy={busyRole === 'cleaned'}
-              label="Cleaned comic"
+              label="Cleaned comic (optional)"
               onSelect={(file) => void importImage('cleaned', file)}
             />
             <button
@@ -2306,7 +2360,7 @@ export function App() {
               disabled={!pair.original || autoCleanBusy || busyRole !== null}
               onClick={() => void autoCleanFromOriginal()}
               type="button"
-              title="Erase bubble text from the original page automatically. Import a hand-prepared cleaned page anytime to override."
+              title="Erase bubble text from the original page automatically. Import a hand-prepared cleaned page anytime to override. Runs automatically when you import an original page."
             >
               {autoCleanBusy ? 'Auto-cleaning…' : 'Auto-clean page'}
             </button>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoCleanPage,
+  needsAutoClean,
   proposePagePacingFromDialogues,
   triageOcrDocument,
 } from '../../apps/web/src/engine-adapters.js';
@@ -71,6 +72,13 @@ describe('engine-adapters', () => {
     expect(result.cleaned.width).toBe(width);
     expect(result.masks.length).toBeGreaterThanOrEqual(0);
     expect(result.erasedPixelCount).toBeGreaterThanOrEqual(0);
+  });
+
+  it('needsAutoClean is true only when original is present without cleaned', () => {
+    expect(needsAutoClean({ original: {}, cleaned: undefined })).toBe(true);
+    expect(needsAutoClean({ original: {}, cleaned: {} })).toBe(false);
+    expect(needsAutoClean({ original: undefined, cleaned: {} })).toBe(false);
+    expect(needsAutoClean({})).toBe(false);
   });
 
   it('queues only low-confidence OCR for review', () => {

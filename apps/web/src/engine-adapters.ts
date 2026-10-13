@@ -110,6 +110,17 @@ export function autoCleanPage(
   };
 }
 
+/**
+ * True when the project has an original page but no cleaned page yet, so
+ * auto-inpaint should synthesize one. Hand-imported cleaned pages skip this.
+ */
+export function needsAutoClean(pagePair: {
+  readonly original?: unknown;
+  readonly cleaned?: unknown;
+}): boolean {
+  return Boolean(pagePair.original) && !pagePair.cleaned;
+}
+
 export type BubbleProposalSource =
   | { readonly kind: 'heuristic' }
   | { readonly kind: 'synthetic-ml' }
