@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 /**
  * Download ONNX weights for comic captioning:
- * - models/bubble-yolo/model.onnx       (YOLOv10n, 80-class detector)
+ * - models/bubble-yolo/model.onnx       (YOLOv10n, 80-class detector fallback)
  * - models/wav2vec2/model_quantized.onnx (wav2vec2-base-960h CTC)
+ *
+ * The preferred bubble detector is comic-speech-bubble-detector.onnx,
+ * exported from models/bubble-yolo/comic-speech-bubble-detector.pt via
+ * `python3 scripts/export-bubble-onnx.py` (not downloaded).
  *
  * Models are gitignored. Re-run after a clean checkout.
  */

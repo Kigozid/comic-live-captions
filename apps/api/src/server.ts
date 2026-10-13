@@ -1153,12 +1153,15 @@ async function handleRequest(
         yoloSessionPromise ??= loadYoloOnnxSession();
         const yoloSession = (await yoloSessionPromise) as ConstructorParameters<
           typeof YoloBubbleProposalProvider
-        >[0]['session'];
+        >[0]['session'] & { classLabels?: readonly string[] };
         providerName = yoloSession.name;
         detector = new HybridBubbleDetector({
           deterministic: bubbleDetectionEngine,
           provider: new YoloBubbleProposalProvider({
             session: yoloSession,
+            ...(yoloSession.classLabels
+              ? { classLabels: yoloSession.classLabels }
+              : {}),
             confidenceThreshold: Number(value.confidenceThreshold ?? 0.25),
             bubbleClassesOnly: value.bubbleClassesOnly !== false,
             maximumProposals: Number(value.maximumProposals ?? 32),
@@ -1459,12 +1462,15 @@ async function handleRequest(
         yoloSessionPromise ??= loadYoloOnnxSession();
         const yoloSession = (await yoloSessionPromise) as ConstructorParameters<
           typeof YoloBubbleProposalProvider
-        >[0]['session'];
+        >[0]['session'] & { classLabels?: readonly string[] };
         proposalProviderName = `yolo:${yoloSession.name}`;
         detector = new HybridBubbleDetector({
           deterministic: bubbleDetectionEngine,
           provider: new YoloBubbleProposalProvider({
             session: yoloSession,
+            ...(yoloSession.classLabels
+              ? { classLabels: yoloSession.classLabels }
+              : {}),
             confidenceThreshold: 0.25,
             bubbleClassesOnly: true,
             maximumProposals: 32,

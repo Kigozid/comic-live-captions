@@ -1,6 +1,7 @@
 import { access, readFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { BUBBLE_DETECTOR_CLASSES } from '@comic-captioner/bubble-engine';
 
 /**
  * Real ONNX model loaders for comic captioning:
@@ -97,15 +98,31 @@ export interface LoadYoloOnnxOptions {
  * Load a YOLO ONNX detector as a `YoloInferenceSession`. YOLOv10 output is
  * already NMS-free end-to-end (detections); v5/v8 are decoded by the
  * bubble-engine port.
+ *
+ * Default weights are the trained comic speech-bubble detector
+ * (YOLOv8, 2 classes at 1024²). Fall back to generic YOLOv10n if absent.
  */
 export async function loadYoloOnnxSession(
   options: LoadYoloOnnxOptions = {},
 ): Promise<import('@comic-captioner/bubble-engine').YoloInferenceSession> {
-  const modelPath = await assertModelFile(
+  const preferredModel =
     options.modelPath ??
-      process.env.COMIC_YOLO_MODEL ??
-      join(DEFAULT_MODELS_DIR, 'bubble-yolo', 'model.onnx'),
-  );
+    process.env.COMIC_YOLO_MODEL ??
+    join(
+      DEFAULT_MODELS_DIR,
+      'bubble-yolo',
+      'comic-speech-bubble-detector.onnx',
+    );
+  const fallbackModel = join(DEFAULT_MODELS_DIR, 'bubble-yolo', 'model.onnx');
+  let modelPath: string;
+  try {
+    modelPath = await assertModelFile(preferredModel);
+  } catch (error) {
+    if (options.modelPath || process.env.COMIC_YOLO_MODEL) throw error;
+    modelPath = await assertModelFile(fallbackModel);
+  }
+
+  const isBubbleDetector = modelPath.includes('comic-speech-bubble-detector');
   const ort = await loadOrt();
   let session: OrtSessionLike;
   try {
@@ -119,10 +136,10 @@ export async function loadYoloOnnxSession(
     );
   }
 
-  const inputWidth = options.inputWidth ?? 640;
-  const inputHeight = options.inputHeight ?? 640;
-  const format = options.format ?? 'yolov10';
-  const numClasses = options.numClasses ?? 80;
+  const inputWidth = options.inputWidth ?? (isBubbleDetector ? 1024 : 640);
+  const inputHeight = options.inputHeight ?? (isBubbleDetector ? 1024 : 640);
+  const format = options.format ?? (isBubbleDetector ? 'yolov8' : 'yolov10');
+  const numClasses = options.numClasses ?? (isBubbleDetector ? 2 : 80);
   const inputName = options.inputName ?? session.inputNames?.[0] ?? 'images';
   const outputName = options.outputName ?? session.outputNames?.[0] ?? 'output0';
   const name = options.name ?? `yolo-onnx:${modelPath}`;
@@ -131,6 +148,8 @@ export async function loadYoloOnnxSession(
     name,
     inputWidth,
     inputHeight,
+    /** Present when this is the trained comic speech-bubble detector. */
+    ...(isBubbleDetector ? { classLabels: BUBBLE_DETECTOR_CLASSES } : {}),
     async detect(input) {
       const tensor = new ort.Tensor('float32', input.data, [
         1,

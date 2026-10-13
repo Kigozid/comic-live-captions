@@ -4,6 +4,11 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const modelsDir = path.resolve(process.cwd(), 'models');
+const bubbleDetectorPath = path.join(
+  modelsDir,
+  'bubble-yolo',
+  'comic-speech-bubble-detector.onnx',
+);
 const yoloModelPath = path.join(modelsDir, 'bubble-yolo', 'model.onnx');
 const wav2vecModelPath = path.join(
   modelsDir,
@@ -20,7 +25,8 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-const hasYolo = await exists(yoloModelPath);
+const hasBubbleDetector = await exists(bubbleDetectorPath);
+const hasYolo = (await exists(yoloModelPath)) || hasBubbleDetector;
 const hasWav2vec = await exists(wav2vecModelPath);
 const hasOrt = await import('onnxruntime-node')
   .then(() => true)
@@ -37,7 +43,90 @@ describe('real ONNX weights', () => {
     expect(true).toBe(true);
   });
 
-  it.runIf(hasYolo && hasOrt)(
+  it.runIf(hasBubbleDetector && hasOrt)(
+    'loads comic-speech-bubble-detector ONNX and proposes bubble boxes',
+    async () => {
+      const { loadYoloOnnxSession } = await import(
+        '../../apps/api/src/onnx-models.js'
+      );
+      const {
+        BUBBLE_DETECTOR_CLASSES,
+        YoloBubbleProposalProvider,
+        letterboxToTensor,
+      } = await import('../../packages/bubble-engine/src/ml-bubble-detector.js');
+      const sharp = (await import('sharp')).default;
+
+      const size = 200;
+      const png = new Uint8Array(
+        await sharp({
+          create: {
+            width: size,
+            height: size,
+            channels: 3,
+            background: { r: 255, g: 255, b: 255 },
+          },
+        })
+          .composite([
+            {
+              input: Buffer.from(
+                `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+                   <rect x="50" y="50" width="100" height="100" rx="30"
+                         fill="#f5f5f5" stroke="#111" stroke-width="6"/>
+                 </svg>`,
+              ),
+            },
+          ])
+          .png()
+          .toBuffer(),
+      );
+
+      const session = await loadYoloOnnxSession({
+        modelPath: bubbleDetectorPath,
+      });
+      expect(session.name).toContain('comic-speech-bubble-detector');
+      expect(session.inputWidth).toBe(1024);
+      expect(
+        (session as { classLabels?: readonly string[] }).classLabels,
+      ).toEqual(BUBBLE_DETECTOR_CLASSES);
+
+      const space = {
+        id: 'image:onnx-bubble' as never,
+        kind: 'image' as const,
+        dimensions: { width: size, height: size },
+      };
+      const provider = new YoloBubbleProposalProvider({
+        session,
+        classLabels: BUBBLE_DETECTOR_CLASSES,
+        confidenceThreshold: 0.05,
+        bubbleClassesOnly: true,
+        maximumProposals: 16,
+      });
+      const proposals = await provider.propose(png, space);
+      expect(Array.isArray(proposals)).toBe(true);
+      for (const proposal of proposals) {
+        expect(proposal.provenance).toBe('ml');
+        expect(proposal.boundingBox.width).toBeGreaterThan(0);
+        expect(proposal.boundingBox.height).toBeGreaterThan(0);
+        expect(proposal.confidence).toBeGreaterThan(0);
+      }
+      // Direct session path: YOLOv8 raw output for the provider to decode.
+      const tensor = await letterboxToTensor(png, 1024, 1024);
+      const raw = await session.detect({
+        data: tensor.data,
+        width: tensor.width,
+        height: tensor.height,
+        scale: tensor.scale,
+        padX: tensor.padX,
+        padY: tensor.padY,
+        originalWidth: size,
+        originalHeight: size,
+      });
+      expect(raw.kind).toBe('yolov8');
+    },
+    120_000,
+  );
+
+  it.runIf(hasYolo && hasOrt && !hasBubbleDetector)(
     'loads YOLOv10n ONNX and proposes bubble boxes on a synthetic page',
     async () => {
       const { loadYoloOnnxSession } = await import(

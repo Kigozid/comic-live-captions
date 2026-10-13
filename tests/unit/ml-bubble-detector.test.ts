@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import {
+  BUBBLE_DETECTOR_CLASSES,
   MlBubbleDetectorError,
   SyntheticYoloSession,
   YoloBubbleProposalProvider,
@@ -160,6 +161,47 @@ describe('nonMaxSuppression', () => {
 });
 
 describe('YoloBubbleProposalProvider', () => {
+  it('keeps text_bubble and drops text_free from the trained detector', async () => {
+    const png = await whitePagePng(200);
+    const session = new SyntheticYoloSession({
+      detections: [
+        {
+          x1: 20,
+          y1: 20,
+          x2: 80,
+          y2: 80,
+          confidence: 0.9,
+          classId: 0,
+          classLabel: 'text_bubble',
+        },
+        {
+          x1: 100,
+          y1: 100,
+          x2: 160,
+          y2: 140,
+          confidence: 0.8,
+          classId: 1,
+          classLabel: 'text_free',
+        },
+      ],
+    });
+    const provider = new YoloBubbleProposalProvider({
+      session,
+      classLabels: BUBBLE_DETECTOR_CLASSES,
+      bubbleClassesOnly: true,
+      confidenceThreshold: 0.1,
+      maximumProposals: 8,
+    });
+    const space = {
+      id: 'image:bubble-detector' as never,
+      kind: 'image' as const,
+      dimensions: { width: 200, height: 200 },
+    };
+    const proposals = await provider.propose(png, space);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.boundingBox.x).toBeCloseTo(20);
+  });
+
   it('emits ML proposals with provenance for hybrid refinement', async () => {
     const png = await whitePagePng(200);
     const session = new SyntheticYoloSession({

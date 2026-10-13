@@ -104,6 +104,7 @@ export type {
   ProposalSupport,
 } from './hybrid-detection.js';
 export {
+  BUBBLE_DETECTOR_CLASSES,
   COMIC_BUBBLE_CLASSES,
   MlBubbleDetectorError,
   SyntheticYoloSession,
