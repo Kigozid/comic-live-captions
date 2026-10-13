@@ -121,6 +121,27 @@ export function needsAutoClean(pagePair: {
   return Boolean(pagePair.original) && !pagePair.cleaned;
 }
 
+/**
+ * Human-readable confidence label that reflects hybrid provenance instead of
+ * always saying "heuristic".
+ */
+export function describeBubbleConfidence(input: {
+  readonly confidence?: number;
+  readonly detectionSources?: readonly string[];
+}): string {
+  if (input.confidence === undefined) return 'manual region';
+  const percent = `${Math.round(input.confidence * 100)}%`;
+  const sources = input.detectionSources ?? [];
+  const hasMl = sources.includes('ml');
+  const hasHeuristic = sources.includes('heuristic');
+  const hasDetected = sources.includes('detected');
+  if (hasMl && (hasHeuristic || hasDetected)) return `${percent} hybrid`;
+  if (hasMl) return `${percent} ML`;
+  if (hasHeuristic && hasDetected) return `${percent} hybrid`;
+  if (hasHeuristic) return `${percent} heuristic`;
+  return `${percent} detected`;
+}
+
 export type BubbleProposalSource =
   | { readonly kind: 'heuristic' }
   | { readonly kind: 'synthetic-ml' }

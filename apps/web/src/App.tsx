@@ -521,6 +521,11 @@ export function App() {
       readonly kind: 'speech' | 'thought' | 'narration' | 'unknown';
       readonly confidence: number;
       readonly classificationConfidence?: number;
+      readonly detectionSources?: readonly (
+        | 'detected'
+        | 'ml'
+        | 'heuristic'
+      )[];
       readonly polygon: {
         readonly points: readonly { readonly x: number; readonly y: number }[];
       };
@@ -548,7 +553,7 @@ export function App() {
   const [readingDirection, setReadingDirection] = useState<'ltr' | 'rtl'>('ltr');
   const [bubbleProposalSource, setBubbleProposalSource] = useState<
     'heuristic' | 'ml'
-  >('heuristic');
+  >('ml');
   const [readingOrder, setReadingOrder] = useState<readonly string[] | null>(
     null,
   );
@@ -1084,7 +1089,7 @@ export function App() {
               ? { kind: 'yolo-onnx' }
               : { kind: 'heuristic' },
         });
-        if (hybrid.bubbles.length > bubbles.length) {
+        if (hybrid.bubbles.length > 0) {
           bubbles = hybrid.bubbles.map((hybridBubble) => ({
             id: hybridBubble.bubble.id,
             kind: hybridBubble.bubble.kind,
@@ -1095,10 +1100,22 @@ export function App() {
                     hybridBubble.bubble.classificationConfidence,
                 }
               : {}),
+            detectionSources: [...hybridBubble.sources] as (
+              | 'detected'
+              | 'ml'
+              | 'heuristic'
+            )[],
             polygon: { points: hybridBubble.bubble.polygon.points },
             tail: hybridBubble.bubble.tail ?? null,
             reviewStatus: 'pending-review' as const,
           })) as typeof bubbles;
+          setProjectMessage(
+            `Hybrid detection: ${hybrid.result.deterministicCount} deterministic, ` +
+              `${hybrid.result.proposalCount} proposals, ` +
+              `${hybrid.result.mergedCount} merged, ` +
+              `${hybrid.result.refinedCount} refined` +
+              (hybrid.provider ? ` (${hybrid.provider}).` : '.'),
+          );
         }
         const panelOrder = await detectPanelsAndOrder(
           pageBytes,

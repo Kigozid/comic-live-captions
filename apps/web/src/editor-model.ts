@@ -32,6 +32,8 @@ export interface EditableBubble {
   readonly confidence?: number;
   readonly classificationConfidence?: number;
   readonly source?: 'detected' | 'manual';
+  /** Hybrid detector provenance: deterministic geometry and/or proposal providers. */
+  readonly detectionSources?: readonly ('detected' | 'ml' | 'heuristic')[];
   readonly reviewStatus?: BubbleReviewStatus;
 }
 
@@ -70,6 +72,11 @@ export type EditorAction =
         readonly kind: BubbleKind;
         readonly confidence: number;
         readonly classificationConfidence?: number;
+        readonly detectionSources?: readonly (
+          | 'detected'
+          | 'ml'
+          | 'heuristic'
+        )[];
         readonly points: readonly { readonly x: number; readonly y: number }[];
         readonly tail?:
           readonly { readonly x: number; readonly y: number }[] | null;
@@ -221,6 +228,9 @@ export function editorReducer(
           ? { classificationConfidence: proposal.classificationConfidence }
           : {}),
         source: 'detected' as const,
+        ...(proposal.detectionSources
+          ? { detectionSources: Object.freeze([...proposal.detectionSources]) }
+          : {}),
         reviewStatus: 'pending-review' as const,
         ...(proposal.tail
           ? {

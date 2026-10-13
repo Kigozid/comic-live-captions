@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoCleanPage,
+  describeBubbleConfidence,
   needsAutoClean,
   proposePagePacingFromDialogues,
   triageOcrDocument,
@@ -79,6 +80,32 @@ describe('engine-adapters', () => {
     expect(needsAutoClean({ original: {}, cleaned: {} })).toBe(false);
     expect(needsAutoClean({ original: undefined, cleaned: {} })).toBe(false);
     expect(needsAutoClean({})).toBe(false);
+  });
+
+  it('describeBubbleConfidence reflects hybrid provenance', () => {
+    expect(describeBubbleConfidence({})).toBe('manual region');
+    expect(describeBubbleConfidence({ confidence: 0.8 })).toBe('80% detected');
+    expect(
+      describeBubbleConfidence({
+        confidence: 0.9,
+        detectionSources: ['detected', 'ml'],
+      }),
+    ).toBe('90% hybrid');
+    expect(
+      describeBubbleConfidence({ confidence: 0.7, detectionSources: ['ml'] }),
+    ).toBe('70% ML');
+    expect(
+      describeBubbleConfidence({
+        confidence: 0.6,
+        detectionSources: ['detected', 'heuristic'],
+      }),
+    ).toBe('60% hybrid');
+    expect(
+      describeBubbleConfidence({
+        confidence: 0.5,
+        detectionSources: ['heuristic'],
+      }),
+    ).toBe('50% heuristic');
   });
 
   it('queues only low-confidence OCR for review', () => {

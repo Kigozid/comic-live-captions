@@ -18,6 +18,7 @@ import {
   candidatesFromObservations,
 } from './review-queue.js';
 import { mapReviewHotkey, type ReviewAction } from './review-hotkeys.js';
+import { describeBubbleConfidence } from './engine-adapters.js';
 
 interface AssetView {
   readonly metadata: SourceImageMetadata;
@@ -85,6 +86,11 @@ export function EditingWorkspace({
       readonly kind: 'speech' | 'thought' | 'narration' | 'unknown';
       readonly confidence: number;
       readonly classificationConfidence?: number;
+      readonly detectionSources?: readonly (
+        | 'detected'
+        | 'ml'
+        | 'heuristic'
+      )[];
       readonly polygon: {
         readonly points: readonly { readonly x: number; readonly y: number }[];
       };
@@ -177,6 +183,9 @@ export function EditingWorkspace({
         confidence: bubble.confidence,
         ...(bubble.classificationConfidence !== undefined
           ? { classificationConfidence: bubble.classificationConfidence }
+          : {}),
+        ...(bubble.detectionSources
+          ? { detectionSources: bubble.detectionSources }
           : {}),
         points: bubble.polygon.points,
         ...(bubble.tail !== undefined ? { tail: bubble.tail } : {}),
@@ -1509,9 +1518,14 @@ export function EditingWorkspace({
                     Review: {selectedBubble.reviewStatus ?? 'pending-review'}
                   </span>
                   <span>
-                    {selectedBubble.confidence === undefined
-                      ? 'manual region'
-                      : `${Math.round(selectedBubble.confidence * 100)}% heuristic`}
+                    {describeBubbleConfidence({
+                      ...(selectedBubble.confidence !== undefined
+                        ? { confidence: selectedBubble.confidence }
+                        : {}),
+                      ...(selectedBubble.detectionSources
+                        ? { detectionSources: selectedBubble.detectionSources }
+                        : {}),
+                    })}
                   </span>
                 </div>
                 {selectedBubble.classificationConfidence !== undefined && (
