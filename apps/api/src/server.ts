@@ -50,8 +50,10 @@ import {
 } from './audio-pcm.js';
 import {
   ForcedAlignAcousticError,
+  OfflineTranscriptionProvider,
   alignWordsAcoustic,
   type CtcFramePosteriorsProvider,
+  type TranscriptionProvider,
 } from '@comic-captioner/audio-engine';
 import type {
   ImageSpace,
@@ -79,6 +81,23 @@ import {
 } from './export.js';
 
 const serviceName = 'comic-captioner-api';
+
+/** Gemini when configured; offline stub otherwise (or when forced). */
+function resolveTranscriptionProviderId(): string {
+  const forced = process.env.COMIC_TRANSCRIPTION_PROVIDER;
+  if (forced === 'offline') return 'offline-stub';
+  if (forced === 'gemini' || process.env.GEMINI_API_KEY) {
+    return process.env.GEMINI_API_KEY ? 'gemini' : 'offline-stub';
+  }
+  return 'offline-stub';
+}
+
+function createTranscriptionProvider(): TranscriptionProvider {
+  const id = resolveTranscriptionProviderId();
+  if (id === 'gemini') return new GeminiTranscriptionProvider();
+  return new OfflineTranscriptionProvider();
+}
+
 const alignmentEngine = new ImageAlignmentEngine();
 const textDifferenceEngine = new TextDifferenceEngine();
 const bubbleDetectionEngine = new BubbleDetectionEngine();
@@ -872,6 +891,7 @@ async function handleRequest(
       service: serviceName,
       configuration: {
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
+        transcriptionProvider: resolveTranscriptionProviderId(),
       },
     });
     return;
@@ -1015,22 +1035,14 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && request.url === '/api/transcribe') {
-    if (!process.env.GEMINI_API_KEY) {
-      sendJson(response, 503, {
-        error: {
-          code: 'TRANSCRIPTION_NOT_CONFIGURED',
-          message: 'Gemini transcription is not configured on the API server.',
-        },
-      });
-      return;
-    }
     try {
       const { audio, asset } = await readMultipartAudio(request);
       const controller = new AbortController();
       request.once('aborted', () => controller.abort());
-      const transcript = await new TranscriptionService(
-        new GeminiTranscriptionProvider(),
-      ).transcribe({
+      // Gemini when configured; offline stub otherwise so demos can still run
+      // map → fit → export. Set COMIC_TRANSCRIPTION_PROVIDER=offline to force.
+      const provider = createTranscriptionProvider();
+      const transcript = await new TranscriptionService(provider).transcribe({
         asset,
         bytes: new Uint8Array(
           audio.bytes.buffer,
@@ -1041,7 +1053,7 @@ async function handleRequest(
       });
 
       // WhisperX-style refinement: wav2vec2 CTC forced alignment of transcript
-      // words to acoustic frames. Falls back to Gemini timings when weights or
+      // words to acoustic frames. Falls back to provider timings when weights or
       // FFmpeg are unavailable.
       const refined = await refineTranscriptWordTimes(
         transcript,
@@ -1056,6 +1068,7 @@ async function handleRequest(
       sendJson(response, 200, {
         transcript: refined.transcript,
         acousticAlignment: refined.acousticAlignment,
+        provider: provider.providerId,
       });
     } catch (error) {
       if (error instanceof RequestError) {

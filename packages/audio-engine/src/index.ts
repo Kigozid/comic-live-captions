@@ -2,10 +2,12 @@ import type { AudioTime, AudioTimebase } from '@comic-captioner/shared';
 import type { AudioAssetRef } from '@comic-captioner/core';
 export {
   MockTranscriptionProvider,
+  OfflineTranscriptionProvider,
   TranscriptionError,
   TranscriptionService,
 } from './transcription.js';
 export type {
+  OfflineTranscriptionProviderOptions,
   ProviderTranscriptOutput,
   ProviderWordTimestamp,
   Transcript,

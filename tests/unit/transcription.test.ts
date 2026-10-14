@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MockTranscriptionProvider,
+  OfflineTranscriptionProvider,
   TranscriptionError,
   TranscriptionService,
   type AudioAssetMetadata,
@@ -215,6 +216,26 @@ describe('TranscriptionService', () => {
     expect(new TranscriptionError('INVALID_OUTPUT', 'bad').code).toBe(
       'INVALID_OUTPUT',
     );
+  });
+
+  it('offline stub produces ordered placeholder words spanning the audio', async () => {
+    const input = await fixtureInput();
+    const transcript = await new TranscriptionService(
+      new OfflineTranscriptionProvider(),
+    ).transcribe(input);
+    expect(transcript.provenance.provider).toBe('offline-stub');
+    expect(transcript.segments.length).toBeGreaterThan(0);
+    const words = transcript.segments.flatMap((segment) => segment.words);
+    expect(words.length).toBeGreaterThanOrEqual(3);
+    expect(words[0]!.start.value).toBeGreaterThanOrEqual(0);
+    expect(words[words.length - 1]!.end.value).toBeLessThanOrEqual(
+      input.asset.durationSeconds,
+    );
+    for (let i = 1; i < words.length; i += 1) {
+      expect(words[i]!.start.value).toBeGreaterThanOrEqual(
+        words[i - 1]!.start.value,
+      );
+    }
   });
 });
 
