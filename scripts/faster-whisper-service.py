@@ -107,10 +107,18 @@ class FasterWhisperEngine:
     ) -> dict[str, Any]:
         self.load()
         assert self.model is not None
+        # faster-whisper accepts a 16 kHz float32 waveform for ndarray input
+        # (this version has no sampling_rate= kwarg).
+        if sample_rate != 16000:
+            duration = samples.shape[0] / float(sample_rate)
+            target = max(1, int(round(duration * 16000)))
+            x_old = np.linspace(0.0, 1.0, num=samples.shape[0], endpoint=False)
+            x_new = np.linspace(0.0, 1.0, num=target, endpoint=False)
+            samples = np.interp(x_new, x_old, samples).astype(np.float32)
+        samples = np.ascontiguousarray(samples, dtype=np.float32)
         with self._infer_lock:
             segments_iter, info = self.model.transcribe(
                 samples,
-                sampling_rate=sample_rate,
                 language=language,
                 word_timestamps=word_timestamps,
                 vad_filter=True,

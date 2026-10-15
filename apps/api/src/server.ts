@@ -1141,6 +1141,8 @@ async function handleRequest(
           cause instanceof Error &&
           (cause.name === 'WhisperTranscriptionError' ||
             cause.name === 'FasterWhisperError' ||
+            (cause as { code?: string }).code === 'UNAVAILABLE' ||
+            (cause as { code?: string }).code === 'MODEL_MISSING' ||
             /MODEL_MISSING|MODEL_LOAD_FAILED|UNAVAILABLE/i.test(cause.message));
         const localDefault =
           resolveTranscriptionProviderId() === 'whisper' ||
