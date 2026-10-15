@@ -5,7 +5,7 @@ import { createImageSpace } from '@comic-captioner/shared';
 import type { DialogueMapping } from '@comic-captioner/core';
 import type { ClockSnapshot, Transcript } from '@comic-captioner/audio-engine';
 import { emptyEditorHistory, editorReducer } from './editor-model.js';
-import type { EditableDialogue, EditorDocument } from './editor-model.js';
+import type { EditorDocument } from './editor-model.js';
 import { requestAssist } from './assist-client.js';
 import type { AssistProposal, AssistTask } from './assist-client.js';
 import { proposeTranscriptBubbleMappings } from './dialogue-review.js';
@@ -19,6 +19,7 @@ import {
 } from './review-queue.js';
 import { mapReviewHotkey, type ReviewAction } from './review-hotkeys.js';
 import { describeBubbleConfidence } from './engine-adapters.js';
+import { WorkspaceInspectorPortal } from './WorkspaceInspectorSlot.js';
 
 interface AssetView {
   readonly metadata: SourceImageMetadata;
@@ -27,15 +28,6 @@ interface AssetView {
 interface Drag {
   readonly x: number;
   readonly y: number;
-}
-interface TimelineDrag {
-  readonly dialogueId: string;
-  readonly mode: 'move' | 'trim-start' | 'trim-end';
-  readonly startX: number;
-  readonly trackWidth: number;
-  readonly initialStart: number;
-  readonly initialEnd: number;
-  readonly deltaSeconds: number;
 }
 
 /** Complete single-page editing workspace. Domain entities live only in editorReducer. */
@@ -156,6 +148,126 @@ export function EditingWorkspace({
   const imageWidth = image?.metadata.dimensions.width;
   const imageHeight = image?.metadata.dimensions.height;
   const [history, dispatch] = useReducer(editorReducer, emptyEditorHistory);
+  useEffect(() => {
+    const onUndo = () => dispatch({ type: 'undo' });
+    const onRedo = () => dispatch({ type: 'redo' });
+    window.addEventListener('comic-editor-undo', onUndo);
+    window.addEventListener('comic-editor-redo', onRedo);
+    return () => {
+      window.removeEventListener('comic-editor-undo', onUndo);
+      window.removeEventListener('comic-editor-redo', onRedo);
+    };
+  }, [dispatch]);
+
+  // Publish history depth and stack previews for the toolbar badges.
+  useEffect(() => {
+    const summarize = (document: EditorDocument | null) => {
+      if (!document) return 'Empty';
+      const dialogues = Object.values(document.dialogues);
+      if (dialogues.length === 0) {
+        const bubbles = Object.values(document.bubbles);
+        return bubbles.length
+          ? `${bubbles.length} bubble${bubbles.length === 1 ? '' : 's'}`
+          : 'Empty';
+      }
+      const last = dialogues[dialogues.length - 1]!;
+      return last.caption.slice(0, 28) || 'Caption';
+    };
+    window.dispatchEvent(
+      new CustomEvent('comic-editor-history', {
+        detail: {
+          canUndo: history.past.length > 0,
+          canRedo: history.future.length > 0,
+          undoDepth: history.past.length,
+          redoDepth: history.future.length,
+          undoPreview: history.past
+            .slice(-5)
+            .map((document) => summarize(document))
+            .reverse(),
+          redoPreview: history.future.slice(0, 5).map((document) => summarize(document)),
+        },
+      }),
+    );
+  }, [history]);
+
+  // Accept inspector edits for the selected caption/bubble geometry.
+  useEffect(() => {
+    const onCaptionText = (event: Event) => {
+      const detail = (event as CustomEvent<{ id: string; text: string }>).detail;
+      if (!detail?.id) return;
+      dispatch({
+        type: 'edit-dialogue',
+        dialogueId: detail.id,
+        patch: { caption: detail.text },
+        coalesce: { key: `caption:${detail.id}`, atMs: Date.now() },
+      });
+    };
+    const onCaptionFont = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          id: string;
+          fontSizePx?: number;
+          fontFamily?: string;
+        }>
+      ).detail;
+      if (!detail?.id) return;
+      dispatch({
+        type: 'edit-dialogue',
+        dialogueId: detail.id,
+        patch: {
+          ...(detail.fontSizePx != null ? { fontSizePx: detail.fontSizePx } : {}),
+          ...(detail.fontFamily ? { fontFamily: detail.fontFamily } : {}),
+        },
+      });
+    };
+    const onCaptionTime = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ id: string; start: number; end: number }>
+      ).detail;
+      if (!detail?.id) return;
+      dispatch({
+        type: 'edit-dialogue',
+        dialogueId: detail.id,
+        patch: { start: detail.start, end: detail.end },
+      });
+    };
+    const onBubbleGeometry = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          id: string;
+          x?: number;
+          y?: number;
+          width?: number;
+          height?: number;
+          kind?: string;
+        }>
+      ).detail;
+      if (!detail?.id) return;
+      dispatch({
+        type: 'edit-bubble',
+        bubbleId: detail.id,
+        patch: {
+          ...(detail.x != null ? { x: detail.x } : {}),
+          ...(detail.y != null ? { y: detail.y } : {}),
+          ...(detail.width != null ? { width: detail.width } : {}),
+          ...(detail.height != null ? { height: detail.height } : {}),
+          ...(detail.kind
+            ? { kind: detail.kind as 'speech' | 'thought' | 'narration' | 'unknown' }
+            : {}),
+        },
+      });
+    };
+    window.addEventListener('comic-editor-caption-text', onCaptionText);
+    window.addEventListener('comic-editor-caption-font', onCaptionFont);
+    window.addEventListener('comic-editor-caption-time', onCaptionTime);
+    window.addEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
+    return () => {
+      window.removeEventListener('comic-editor-caption-text', onCaptionText);
+      window.removeEventListener('comic-editor-caption-font', onCaptionFont);
+      window.removeEventListener('comic-editor-caption-time', onCaptionTime);
+      window.removeEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
+    };
+  }, [dispatch]);
   const [proposal, setProposal] = useState<AssistProposal | null>(null);
   const [mappingProposals, setMappingProposals] = useState<
     readonly DialogueMapping[]
@@ -178,7 +290,48 @@ export function EditingWorkspace({
   const [drawing, setDrawing] = useState<Drag | null>(null);
   const [dragEnd, setDragEnd] = useState<Drag | null>(null);
   const [movingDialogueId, setMovingDialogueId] = useState<string | null>(null);
-  const [timelineDrag, setTimelineDrag] = useState<TimelineDrag | null>(null);
+
+  // Publish selection so the right inspector can show the active object.
+  useEffect(() => {
+    const bubble = selectedBubbleId
+      ? history.present?.bubbles[selectedBubbleId]
+      : undefined;
+    const dialogue = selectedDialogueId
+      ? history.present?.dialogues[selectedDialogueId]
+      : selectedBubbleId
+        ? history.present?.dialogues[`dialogue:${selectedBubbleId}`]
+        : undefined;
+    window.dispatchEvent(
+      new CustomEvent('comic-editor-selection', {
+        detail: {
+          kind: bubble ? 'bubble' : dialogue ? 'caption' : 'none',
+          bubbleId: selectedBubbleId,
+          dialogueId:
+            selectedDialogueId ??
+            (selectedBubbleId ? `dialogue:${selectedBubbleId}` : null),
+          bubble: bubble
+            ? {
+                id: bubble.id,
+                kind: bubble.kind,
+                confidence: bubble.confidence ?? null,
+                boundingBox: bubble.boundingBox,
+              }
+            : null,
+          caption: dialogue
+            ? {
+                id: dialogue.id,
+                text: dialogue.caption,
+                startSeconds: dialogue.start,
+                endSeconds: dialogue.end,
+                fontFamily: dialogue.fontFamily,
+                fontSizePx: dialogue.fontSizePx,
+              }
+            : null,
+        },
+      }),
+    );
+  }, [history.present, selectedBubbleId, selectedDialogueId]);
+
   const svgRef = useRef<SVGSVGElement>(null);
   const appliedMappingRevision = useRef<number | null>(null);
   const space = useMemo(
@@ -707,77 +860,6 @@ export function EditingWorkspace({
     setDragEnd(null);
   }
 
-  function beginTimelineDrag(
-    event: ReactPointerEvent<HTMLButtonElement>,
-    dialogue: EditableDialogue,
-  ) {
-    const clip = event.currentTarget.getBoundingClientRect();
-    const lane = event.currentTarget.parentElement?.getBoundingClientRect();
-    if (!lane || lane.width <= 0) return;
-    const localX = event.clientX - clip.left;
-    const mode =
-      localX < 9 ? 'trim-start' : clip.width - localX < 9 ? 'trim-end' : 'move';
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setTimelineDrag({
-      dialogueId: dialogue.id,
-      mode,
-      startX: event.clientX,
-      trackWidth: lane.width,
-      initialStart: dialogue.start,
-      initialEnd: dialogue.end,
-      deltaSeconds: 0,
-    });
-  }
-
-  function updateTimelineDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!timelineDrag) return;
-    setTimelineDrag({
-      ...timelineDrag,
-      deltaSeconds:
-        ((event.clientX - timelineDrag.startX) / timelineDrag.trackWidth) *
-        timelineEnd,
-    });
-  }
-
-  function finishTimelineDrag() {
-    if (!timelineDrag) return;
-    const delta = timelineDrag.deltaSeconds;
-    const duration = timelineDrag.initialEnd - timelineDrag.initialStart;
-    const start =
-      timelineDrag.mode === 'trim-start'
-        ? Math.max(
-            0,
-            Math.min(
-              timelineDrag.initialEnd - 0.05,
-              timelineDrag.initialStart + delta,
-            ),
-          )
-        : timelineDrag.mode === 'move'
-          ? Math.max(
-              0,
-              Math.min(
-                timelineEnd - duration,
-                timelineDrag.initialStart + delta,
-              ),
-            )
-          : timelineDrag.initialStart;
-    const end =
-      timelineDrag.mode === 'trim-end'
-        ? Math.max(
-            timelineDrag.initialStart + 0.05,
-            Math.min(timelineEnd, timelineDrag.initialEnd + delta),
-          )
-        : timelineDrag.mode === 'move'
-          ? start + duration
-          : timelineDrag.initialEnd;
-    commit({
-      type: 'edit-dialogue',
-      dialogueId: timelineDrag.dialogueId,
-      patch: { start, end },
-    });
-    setTimelineDrag(null);
-  }
-
   if (!image || !space || !document)
     return (
       <section className="p-8 text-center text-stone-600">
@@ -795,64 +877,68 @@ export function EditingWorkspace({
       : null;
 
   return (
-    <main className="comic-editor-workspace flex min-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-xl border border-stone-300 bg-stone-100 text-stone-900">
-      <header className="comic-workspace-toolbar flex items-center justify-between border-b border-stone-300 bg-white px-4 py-2">
-        <div className="font-semibold">Comic editing workspace</div>
-        <div className="flex gap-2">
-          {onAutomateSpeech && (
-            <button
-              className="editor-button"
-              disabled={
-                speechAutomationBusy ||
-                !speechAutomationReady ||
-                (!cleaned && !original) ||
-                !audioAsset ||
-                !transcript
-              }
-              onClick={onAutomateSpeech}
-              type="button"
-              title="Run the full pipeline (detect → OCR → transcribe → map → fit → timeline) and open the confidence-sorted review queue"
-            >
-              {speechAutomationBusy
-                ? 'Running auto pipeline…'
-                : 'Auto everything'}
-            </button>
-          )}
-          {transcript && (
-            <button
-              className="editor-button"
-              onClick={proposeTranscriptMappings}
-              type="button"
-            >
-              Suggest dialogue matches
-            </button>
-          )}
+    <main className="comic-editor-workspace comic-canvas-stage">
+      <div className="comic-canvas-toolbar" role="toolbar" aria-label="Canvas tools">
+        <button
+          type="button"
+          className={`canvas-mode-button ${canvasMode === 'select' ? 'is-active' : ''}`}
+          aria-pressed={canvasMode === 'select'}
+          onClick={() => setCanvasMode('select')}
+          title="Select and move objects · V"
+        >
+          Select
+        </button>
+        <button
+          type="button"
+          className={`canvas-mode-button ${canvasMode === 'bubble' ? 'is-active' : ''}`}
+          aria-pressed={canvasMode === 'bubble'}
+          onClick={() => setCanvasMode('bubble')}
+          title="Draw bubble · B"
+        >
+          + Bubble
+        </button>
+        <button
+          className="canvas-mode-button"
+          aria-pressed={showDetection}
+          onClick={() => setShowDetection((visible) => !visible)}
+          type="button"
+        >
+          {showDetection ? 'Hide detections' : 'Show detections'}
+        </button>
+        <button
+          className="canvas-mode-button"
+          disabled={selectedBubbleIds.length < 2}
+          onClick={mergeSelectedBubbles}
+          type="button"
+        >
+          Merge {selectedBubbleIds.length > 1 ? selectedBubbleIds.length : ''}
+        </button>
+        <button
+          className="canvas-mode-button"
+          disabled={selectedBubbleIds.length !== 1}
+          onClick={splitSelectedBubble}
+          type="button"
+        >
+          Split at center
+        </button>
+        {transcript && (
           <button
-            className="editor-button"
-            disabled={!history.past.length}
-            onClick={() => commit({ type: 'undo' })}
+            className="canvas-mode-button"
+            onClick={proposeTranscriptMappings}
+            type="button"
+            title="Suggest transcript-to-bubble dialogue matches"
           >
-            Undo
+            Suggest matches
           </button>
-          <button
-            className="editor-button"
-            disabled={!history.future.length}
-            onClick={() => commit({ type: 'redo' })}
-          >
-            Redo
-          </button>
-          <span
-            className="hidden self-center text-xs text-stone-500 lg:inline"
-            title="Enter/A accept · J/K or ↑/↓ next/prev · E edit · Space play · ⌘Z undo · ⌘⇧Z redo · 1–9 alternatives"
-          >
-            J/K navigate · A accept · E edit
-          </span>
-        </div>
-      </header>
+        )}
+        <span className="canvas-toolbar-meta">
+          {space.dimensions.width} × {space.dimensions.height} · ImageSpace
+        </span>
+      </div>
       {reviewQueue && reviewQueue.items.length > 0 && (
         <section
           aria-label="Confidence-sorted review queue"
-          className="border-b border-indigo-200 bg-indigo-50 px-4 py-3"
+          className="canvas-review-strip"
         >
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-sm font-semibold">
             <span>
@@ -913,7 +999,7 @@ export function EditingWorkspace({
       {mappingProposals.length > 0 && (
         <section
           aria-label="Dialogue match proposals"
-          className="border-b border-amber-300 bg-amber-50 px-4 py-3"
+          className="canvas-review-strip is-mapping"
         >
           <div className="mb-2 text-sm font-semibold">
             Dialogue matches · review each suggestion
@@ -963,189 +1049,12 @@ export function EditingWorkspace({
           </div>
         </section>
       )}
-      <div className="grid min-h-0 flex-1 lg:grid-cols-[13rem_minmax(0,1fr)_19rem]">
-        <aside
-          aria-label="Assets"
-          id="comic-assets"
-          className="comic-media-panel border-b border-stone-300 bg-white p-3 lg:border-b-0 lg:border-r"
-        >
-          <h2 className="mb-3 font-semibold">Assets</h2>
-          {[original, cleaned].map((asset, index) => (
-            <div
-              key={index}
-              className="mb-3 rounded-lg border border-stone-200 p-2"
-            >
-              {asset ? (
-                <>
-                  <img
-                    className="mb-2 max-h-24 w-full object-contain"
-                    src={asset.src}
-                    alt={asset.metadata.filename}
-                  />
-                  <div className="truncate text-xs font-medium">
-                    {asset.metadata.filename}
-                  </div>
-                  <div className="text-xs text-stone-500">
-                    {asset.metadata.dimensions.width} ×{' '}
-                    {asset.metadata.dimensions.height}
-                  </div>
-                </>
-              ) : (
-                <div className="text-xs text-stone-400">
-                  {index === 0 ? 'Original comic' : 'Cleaned comic'} · not
-                  imported
-                </div>
-              )}
-            </div>
-          ))}
-          <div className="rounded-lg border border-stone-200 p-2 text-xs">
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="font-medium">Audio asset</div>
-                <div
-                  className="truncate text-stone-500"
-                  title={audioName ?? undefined}
-                >
-                  {audioName ?? 'No audio asset imported'}
-                </div>
-                {audioAsset && (
-                  <div className="mt-1 text-[11px] text-stone-500">
-                    {audioAsset.format.toUpperCase()} ·{' '}
-                    {formatSeconds(audioAsset.durationSeconds)} ·{' '}
-                    {(audioAsset.sizeBytes / 1_048_576).toFixed(1)} MB
-                  </div>
-                )}
-                {audioAsset && (
-                  <div className="mt-1 text-[11px] text-emerald-700">
-                    {hasTranscript
-                      ? 'Transcript connected'
-                      : 'Automate speech will generate the transcript'}
-                  </div>
-                )}
-              </div>
-              {audioAsset && (
-                <button
-                  aria-label={
-                    audioClock?.status === 'playing'
-                      ? 'Pause narration audio'
-                      : 'Play narration audio'
-                  }
-                  className="shrink-0 rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
-                  disabled={!onAudioToggle || audioClock?.status === 'empty'}
-                  onClick={onAudioToggle}
-                  type="button"
-                >
-                  {audioClock?.status === 'playing' ? 'Pause' : 'Play'}
-                </button>
-              )}
-            </div>
-            <button
-              className="mt-2 w-full rounded-md border border-stone-300 px-2 py-1.5 text-xs font-medium hover:bg-stone-50"
-              onClick={onAudioImport}
-              type="button"
-            >
-              {audioAsset ? 'Replace audio' : 'Import audio'}
-            </button>
-            {audioAsset && audioClock && (
-              <>
-                <input
-                  aria-label="Workspace audio position"
-                  className="mt-3 w-full accent-indigo-700"
-                  type="range"
-                  min="0"
-                  max={audioClock.durationSeconds || audioAsset.durationSeconds}
-                  step="0.01"
-                  value={Math.min(
-                    audioClock.positionSeconds,
-                    audioClock.durationSeconds || audioAsset.durationSeconds,
-                  )}
-                  onChange={(event) =>
-                    onAudioSeek?.(Number(event.currentTarget.value))
-                  }
-                />
-                <div className="flex justify-between tabular-nums text-[11px] text-stone-500">
-                  <span>{formatSeconds(audioClock.positionSeconds)}</span>
-                  <span>
-                    {hasTranscript
-                      ? 'Transcript synced'
-                      : 'Transcript not generated'}
-                  </span>
-                  <span>{formatSeconds(audioAsset.durationSeconds)}</span>
-                </div>
-                {liveTranscriptText && (
-                  <p
-                    className="mt-2 line-clamp-2 rounded bg-indigo-50 px-2 py-1.5 text-xs text-indigo-900"
-                    aria-live="polite"
-                  >
-                    {liveTranscriptText}
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-          <div className="mt-4 text-xs text-stone-500">
-            Drag on the page to create a bubble. Geometry is stored in image
-            pixels.
-          </div>
-        </aside>
-        <section
-          aria-label="Comic canvas"
-          id="comic-preview"
-          className="comic-preview-panel min-w-0 overflow-auto p-3"
-        >
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="font-semibold">Comic canvas</h2>
-            <div className="comic-canvas-toolbar flex items-center gap-2">
-              <button
-                type="button"
-                className={`canvas-mode-button ${canvasMode === 'select' ? 'is-active' : ''}`}
-                aria-pressed={canvasMode === 'select'}
-                onClick={() => setCanvasMode('select')}
-                title="Select and move objects · V"
-              >
-                Select
-              </button>
-              <button
-                type="button"
-                className={`canvas-mode-button ${canvasMode === 'bubble' ? 'is-active' : ''}`}
-                aria-pressed={canvasMode === 'bubble'}
-                onClick={() => setCanvasMode('bubble')}
-                title="Draw bubble · B"
-              >
-                + Bubble
-              </button>
-              <button
-                className="rounded border border-stone-300 bg-white px-2 py-1 text-xs"
-                aria-pressed={showDetection}
-                onClick={() => setShowDetection((visible) => !visible)}
-                type="button"
-              >
-                {showDetection ? 'Hide detections' : 'Show detections'}
-              </button>
-              <button
-                className="rounded border border-stone-300 bg-white px-2 py-1 text-xs disabled:opacity-40"
-                disabled={selectedBubbleIds.length < 2}
-                onClick={mergeSelectedBubbles}
-                type="button"
-              >
-                Merge{' '}
-                {selectedBubbleIds.length > 1 ? selectedBubbleIds.length : ''}
-              </button>
-              <button
-                className="rounded border border-stone-300 bg-white px-2 py-1 text-xs disabled:opacity-40"
-                disabled={selectedBubbleIds.length !== 1}
-                onClick={splitSelectedBubble}
-                type="button"
-              >
-                Split at center
-              </button>
-              <span className="text-xs text-stone-500">
-                {space.dimensions.width} × {space.dimensions.height} ·
-                ImageSpace
-              </span>
-            </div>
-          </div>
-          <div className="relative mx-auto w-fit max-w-full">
+      <section
+        aria-label="Comic canvas"
+        id="comic-preview"
+        className="comic-preview-panel"
+      >
+        <div className="relative mx-auto w-fit max-w-full">
             <img
               className="block max-h-[62vh] max-w-full select-none object-contain"
               src={image.src}
@@ -1386,11 +1295,9 @@ export function EditingWorkspace({
             </svg>
           </div>
         </section>
-        <aside
-          aria-label="Inspector"
-          className="comic-inspector overflow-y-auto border-t border-stone-300 bg-white p-4 lg:border-l lg:border-t-0"
-        >
-          <h2 className="mb-3 font-semibold">Inspector</h2>
+        <WorkspaceInspectorPortal>
+          <div className="workspace-review-tools">
+            <h3 className="workspace-review-title">Review</h3>
           {analysis?.confidences && (
             <section
               aria-label="Detection confidences"
@@ -1947,265 +1854,18 @@ export function EditingWorkspace({
                 ))}
               </div>
             </div>
+          ) : selectedBubble ? (
+            <p className="text-sm text-stone-500">
+              This bubble has no dialogue yet. Accept it in the review queue or
+              draw a caption to continue.
+            </p>
           ) : (
             <p className="text-sm text-stone-500">
               Select or draw a bubble to edit its dialogue and geometry.
             </p>
           )}
-        </aside>
-      </div>
-      <section
-        id="comic-timeline"
-        aria-label="Timeline"
-        className="comic-timeline-panel border-t border-stone-300 bg-white p-3"
-      >
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-3">
-            <h2 className="font-semibold">Timeline</h2>
-            <div
-              className="comic-transport-controls"
-              aria-label="Transport controls"
-            >
-              <button
-                type="button"
-                title="Go to beginning · Home"
-                aria-label="Go to beginning"
-                onClick={() => onAudioSeek?.(0)}
-              >
-                |◀
-              </button>
-              <button
-                type="button"
-                title="Previous frame · ←"
-                aria-label="Previous frame"
-                onClick={() =>
-                  onAudioSeek?.(
-                    Math.max(0, (audioClock?.positionSeconds ?? 0) - 1 / 30),
-                  )
-                }
-              >
-                ‹
-              </button>
-              <button
-                type="button"
-                title="Play or pause · Space"
-                aria-label={
-                  audioClock?.status === 'playing'
-                    ? 'Pause playback'
-                    : 'Play playback'
-                }
-                onClick={onAudioToggle}
-                disabled={!audioAsset}
-              >
-                {audioClock?.status === 'playing' ? 'Ⅱ' : '▶'}
-              </button>
-              <button
-                type="button"
-                title="Next frame · →"
-                aria-label="Next frame"
-                onClick={() =>
-                  onAudioSeek?.(
-                    Math.min(
-                      timelineEnd,
-                      (audioClock?.positionSeconds ?? 0) + 1 / 30,
-                    ),
-                  )
-                }
-              >
-                ›
-              </button>
-              <button
-                type="button"
-                title="Go to end · End"
-                aria-label="Go to end"
-                onClick={() =>
-                  onAudioSeek?.(audioClock?.durationSeconds ?? timelineEnd)
-                }
-              >
-                ▶|
-              </button>
-            </div>
-            <span className="font-mono text-xs tabular-nums">
-              {formatSeconds(audioClock?.positionSeconds ?? 0)} /{' '}
-              {formatSeconds(audioClock?.durationSeconds || timelineEnd)}
-            </span>
           </div>
-          <span className="text-xs text-stone-500">
-            Audio seconds · captions map to bubbles
-          </span>
-        </div>
-        <div className="space-y-1">
-          <div className="comic-time-ruler" aria-hidden="true">
-            {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
-              <span key={fraction} style={{ left: `${fraction * 100}%` }}>
-                {formatSeconds(timelineEnd * fraction)}
-              </span>
-            ))}
-          </div>
-          {audioClock && audioClock.durationSeconds > 0 && (
-            <input
-              aria-label="Timeline playhead"
-              className="comic-playhead-scrubber"
-              type="range"
-              min="0"
-              max={audioClock.durationSeconds}
-              step="0.01"
-              value={Math.min(
-                audioClock.positionSeconds,
-                audioClock.durationSeconds,
-              )}
-              onChange={(event) =>
-                onAudioSeek?.(Number(event.currentTarget.value))
-              }
-            />
-          )}
-          {audioClock && audioClock.durationSeconds > 0 && (
-            <div className="relative h-5" aria-label="Audio playhead">
-              <div className="absolute inset-x-0 top-2 border-t border-stone-300" />
-              <div
-                className="absolute top-0 h-5 w-0.5 bg-rose-600"
-                style={{
-                  left: `${Math.min(100, Math.max(0, (audioClock.positionSeconds / timelineEnd) * 100))}%`,
-                }}
-              />
-            </div>
-          )}
-          <div className="comic-track-row">
-            <span className="comic-track-label">VIDEO</span>
-            <div className="comic-track-lane">
-              {(original || cleaned) && (
-                <span className="comic-page-clip">
-                  {cleaned?.metadata.filename ??
-                    original?.metadata.filename ??
-                    'Comic page'}
-                </span>
-              )}
-            </div>
-          </div>
-          {audioAsset && (
-            <div className="comic-track-row">
-              <span className="comic-track-label">VOICE</span>
-              <div className="comic-track-lane">
-                <span className="comic-audio-clip">
-                  ♪ {audioName ?? 'Narration audio'}
-                </span>
-              </div>
-            </div>
-          )}
-          {document.order.map((id) => {
-            const dialogue = document.dialogues[id];
-            if (!dialogue) return null;
-            const activeDrag =
-              timelineDrag?.dialogueId === id ? timelineDrag : null;
-            const previewStart = activeDrag
-              ? activeDrag.mode === 'trim-start'
-                ? Math.max(0, activeDrag.initialStart + activeDrag.deltaSeconds)
-                : activeDrag.mode === 'move'
-                  ? Math.max(
-                      0,
-                      activeDrag.initialStart + activeDrag.deltaSeconds,
-                    )
-                  : activeDrag.initialStart
-              : dialogue.start;
-            const previewEnd = activeDrag
-              ? activeDrag.mode === 'trim-end'
-                ? Math.min(
-                    timelineEnd,
-                    activeDrag.initialEnd + activeDrag.deltaSeconds,
-                  )
-                : activeDrag.mode === 'move'
-                  ? previewStart +
-                    (activeDrag.initialEnd - activeDrag.initialStart)
-                  : activeDrag.initialEnd
-              : dialogue.end;
-            const left = Math.max(0, (previewStart / timelineEnd) * 100);
-            const width = Math.max(
-              1,
-              ((previewEnd - previewStart) / timelineEnd) * 100,
-            );
-            return (
-              <div
-                className={`comic-track-row ${id === selectedDialogueId ? 'is-selected' : ''}`}
-                key={id}
-                onClick={() => {
-                  setSelectedDialogueId(id);
-                  setSelectedBubbleId(dialogue.bubbleId);
-                  onAudioSeek?.(dialogue.start);
-                }}
-              >
-                <span className="comic-track-label">CAPTION</span>
-                <div className="comic-track-lane">
-                  <button
-                    className="comic-caption-clip absolute top-1 h-6 truncate px-2 text-left text-xs"
-                    style={{ left: `${left}%`, width: `${width}%` }}
-                    aria-label={`Select dialogue ${dialogue.caption || 'untitled'}`}
-                    onPointerDown={(event) =>
-                      beginTimelineDrag(event, dialogue)
-                    }
-                    onPointerMove={updateTimelineDrag}
-                    onPointerUp={finishTimelineDrag}
-                    onPointerCancel={finishTimelineDrag}
-                  >
-                    {dialogue.caption || 'Untitled dialogue'} ·{' '}
-                    {dialogue.start.toFixed(2)}–{dialogue.end.toFixed(2)}s
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          {document.order.length === 0 && (
-            <p className="text-sm text-stone-500">
-              Draw a bubble on the page to add its dialogue event.
-            </p>
-          )}
-        </div>
-        {selectedDialogue && (
-          <div className="mt-2 flex items-center gap-3 text-xs">
-            <span className="w-28">Selected timing</span>
-            <label>
-              Start{' '}
-              <input
-                aria-label="Dialogue start"
-                className="editor-input w-24"
-                type="number"
-                min="0"
-                step="0.01"
-                value={selectedDialogue.start}
-                onChange={(event) =>
-                  commit({
-                    type: 'edit-dialogue',
-                    dialogueId: selectedDialogue.id,
-                    patch: { start: Number(event.currentTarget.value) },
-                  })
-                }
-              />
-            </label>
-            <label>
-              End{' '}
-              <input
-                aria-label="Dialogue end"
-                className="editor-input w-24"
-                type="number"
-                min={selectedDialogue.start + 0.01}
-                step="0.01"
-                value={selectedDialogue.end}
-                onChange={(event) =>
-                  commit({
-                    type: 'edit-dialogue',
-                    dialogueId: selectedDialogue.id,
-                    patch: { end: Number(event.currentTarget.value) },
-                  })
-                }
-              />
-            </label>
-          </div>
-        )}
-      </section>
+        </WorkspaceInspectorPortal>
     </main>
   );
-}
-
-function formatSeconds(seconds: number): string {
-  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-  return `${Math.floor(safe / 60)}:${(safe % 60).toFixed(2).padStart(5, '0')}`;
 }

@@ -31,6 +31,12 @@ export default defineConfig({
       '@comic-captioner/rendering': fileURLToPath(
         new URL('./packages/rendering/src/index.ts', import.meta.url),
       ),
+      '@comic-captioner/video-composer': fileURLToPath(
+        new URL('./packages/video-composer/src/index.ts', import.meta.url),
+      ),
+      '@comic-captioner/video-composer/remotion': fileURLToPath(
+        new URL('./packages/video-composer/src/remotion/index.ts', import.meta.url),
+      ),
     },
   },
   test: {

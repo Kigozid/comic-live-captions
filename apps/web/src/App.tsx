@@ -1,4 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import './editor-shell.css';
+import {
+  EditorInspector,
+  type InspectorSelection,
+} from './EditorInspector.js';
+import { EditorTimeline } from './EditorTimeline.js';
+import {
+  IconAudio,
+  IconBubble,
+  IconImage,
+  IconLayers,
+  IconOcr,
+  IconPages,
+  IconRedo,
+  IconSave,
+  IconText,
+  IconTheme,
+  IconUndo,
+  IconUpload,
+  IconVideo,
+  IconZoomIn,
+  IconZoomOut,
+} from './editor-icons.js';
 import type {
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
@@ -46,6 +69,19 @@ import type {
 import { exportComicFrame } from './browser-export.js';
 import { exportMp4ViaServer } from './mp4-export.js';
 import type { Mp4ExportProgress, Mp4Resolution } from './mp4-export.js';
+import { VideoExportPanel } from './VideoExportPanel.js';
+import {
+  ToolDrawer,
+  ToolDrawerRow,
+  ToolDrawerSection,
+} from './ToolDrawer.js';
+import {
+  buildMultiPageExportPlan,
+  createPageWorkspace,
+  movePage,
+  replacePage,
+  type PageWorkspace,
+} from './project-pages.js';
 import {
   autoCleanPage,
   detectBubblesHybrid,
@@ -503,7 +539,90 @@ export function App() {
   );
   const [mp4Exporting, setMp4Exporting] = useState(false);
   const mp4AbortRef = useRef<AbortController | null>(null);
+  const [projectPages, setProjectPages] = useState<readonly PageWorkspace[]>([]);
+  const [activePageId, setActivePageId] = useState<string | null>(null);
+  const [editorTheme, setEditorTheme] = useState<'light' | 'dark'>('light');
+  const [activeTool, setActiveTool] = useState('pages');
+  const [canvasZoom, setCanvasZoom] = useState(100);
+  const [timelineCollapsed, setTimelineCollapsed] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(280);
+  const [timelineZoom, setTimelineZoom] = useState(40);
+  const [timelineSelection, setTimelineSelection] = useState<{
+    kind: 'page' | 'audio' | 'caption';
+    id: string;
+  } | null>(null);
+  const [savingProject, setSavingProject] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [editorHistoryStatus, setEditorHistoryStatus] = useState({
+    canUndo: false,
+    canRedo: false,
+    undoDepth: 0,
+    redoDepth: 0,
+    undoPreview: [] as string[],
+    redoPreview: [] as string[],
+  });
+  const [liveSelection, setLiveSelection] = useState<{
+    kind: 'none' | 'bubble' | 'caption';
+    bubbleId: string | null;
+    dialogueId: string | null;
+    bubble: {
+      id: string;
+      kind: string;
+      confidence: number | null;
+      boundingBox: { x: number; y: number; width: number; height: number };
+    } | null;
+    caption: {
+      id: string;
+      text: string;
+      startSeconds: number;
+      endSeconds: number;
+      fontFamily: string;
+      fontSizePx: number;
+    } | null;
+  } | null>(null);
+
+  useEffect(() => {
+    const onHistory = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          canUndo: boolean;
+          canRedo: boolean;
+          undoDepth: number;
+          redoDepth: number;
+          undoPreview?: string[];
+          redoPreview?: string[];
+        }>
+      ).detail;
+      if (detail)
+        setEditorHistoryStatus({
+          canUndo: detail.canUndo,
+          canRedo: detail.canRedo,
+          undoDepth: detail.undoDepth,
+          redoDepth: detail.redoDepth,
+          undoPreview: detail.undoPreview ?? [],
+          redoPreview: detail.redoPreview ?? [],
+        });
+    };
+    const onSelection = (event: Event) => {
+      const detail = (event as CustomEvent<typeof liveSelection>).detail;
+      if (detail) setLiveSelection(detail);
+    };
+    window.addEventListener('comic-editor-history', onHistory);
+    window.addEventListener('comic-editor-selection', onSelection);
+    return () => {
+      window.removeEventListener('comic-editor-history', onHistory);
+      window.removeEventListener('comic-editor-selection', onSelection);
+    };
+  }, []);
+
+  const canUndo = editorHistoryStatus.canUndo;
+  const canRedo = editorHistoryStatus.canRedo;
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = editorTheme;
+  }, [editorTheme]);
   const projectImportRef = useRef<HTMLInputElement>(null);
+  const pageImportInputRef = useRef<HTMLInputElement>(null);
   const [pair, setPair] = useState<ImagePair>(emptyPair);
   const [sourceUrls, setSourceUrls] = useState<
     Partial<Record<SourceImageRole, string>>
@@ -560,6 +679,16 @@ export function App() {
       readonly ocrRecognition: number | null;
       readonly bubbleAssociation: number | null;
     };
+    readonly panels?: readonly {
+      readonly id: string;
+      readonly bounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly label?: string;
+    }[];
     readonly ocr: {
       readonly blocks: readonly {
         readonly lines: readonly {
@@ -595,6 +724,10 @@ export function App() {
   const [letteringApprovedIds, setLetteringApprovedIds] = useState<string[]>(
     [],
   );
+  const letteringStrokeRef = useRef<{
+    mode: 'add' | 'exclude';
+    layer: Uint8Array;
+  } | null>(null);
   const letteringRequestRef = useRef(0);
   const [readingDirection, setReadingDirection] = useState<'ltr' | 'rtl'>('ltr');
   const [bubbleProposalSource, setBubbleProposalSource] = useState<
@@ -902,6 +1035,8 @@ export function App() {
     regionIds?: readonly string[];
     approvedRegionIds?: readonly string[];
     erasureScope?: 'bubble-interior' | 'approved';
+    manualAdds?: readonly Uint8Array[];
+    manualExcludes?: readonly Uint8Array[];
   }) {
     const requestId = `lettering-${++letteringRequestRef.current}`;
     try {
@@ -911,17 +1046,19 @@ export function App() {
         addPixels?: Uint8Array;
         excludePixels?: Uint8Array;
       }[] = [];
-      if (letteringManualAdds.length > 0) {
+      const adds = input.manualAdds ?? letteringManualAdds;
+      const excludes = input.manualExcludes ?? letteringManualExcludes;
+      if (adds.length > 0) {
         const add = new Uint8Array(pixelCount);
-        for (const layer of letteringManualAdds) {
+        for (const layer of adds) {
           if (layer.length !== pixelCount) continue;
           for (let i = 0; i < pixelCount; i += 1) if (layer[i]) add[i] = 1;
         }
         manualEdits.push({ addPixels: add });
       }
-      if (letteringManualExcludes.length > 0) {
+      if (excludes.length > 0) {
         const exclude = new Uint8Array(pixelCount);
-        for (const layer of letteringManualExcludes) {
+        for (const layer of excludes) {
           if (layer.length !== pixelCount) continue;
           for (let i = 0; i < pixelCount; i += 1) if (layer[i]) exclude[i] = 1;
         }
@@ -991,6 +1128,77 @@ export function App() {
       }
     } catch {
       // Lettering API is an enhancement; local auto-clean result remains.
+    }
+  }
+
+  async function reprocessLettering(options?: {
+    readonly regionIds?: readonly string[];
+    readonly approvedRegionIds?: readonly string[];
+    readonly erasureScope?: 'bubble-interior' | 'approved';
+    readonly manualAdds?: readonly Uint8Array[];
+    readonly manualExcludes?: readonly Uint8Array[];
+    readonly resetApproved?: boolean;
+  }) {
+    const file = sourceBlobs.original;
+    const metadata = pair.original;
+    if (!file || !metadata) return;
+    const raster = await rasterFromImageSource(file);
+    if (options?.resetApproved) setLetteringApprovedIds([]);
+    await runLetteringRemoval({
+      imageBytes: new Uint8Array(
+        raster.data.buffer,
+        raster.data.byteOffset,
+        raster.data.byteLength,
+      ),
+      width: raster.width,
+      height: raster.height,
+      ...(options?.regionIds ? { regionIds: options.regionIds } : {}),
+      ...(options?.approvedRegionIds
+        ? { approvedRegionIds: options.approvedRegionIds }
+        : options?.resetApproved
+          ? { approvedRegionIds: [] }
+          : { approvedRegionIds: letteringApprovedIds }),
+      ...(options?.erasureScope
+        ? { erasureScope: options.erasureScope }
+        : {}),
+      ...(options?.manualAdds ? { manualAdds: options.manualAdds } : {}),
+      ...(options?.manualExcludes
+        ? { manualExcludes: options.manualExcludes }
+        : {}),
+    });
+  }
+
+  function paintLetteringMask(
+    mode: 'add' | 'exclude',
+    x: number,
+    y: number,
+    radius: number,
+  ) {
+    const metadata = pair.original;
+    if (!metadata) return;
+    const width = metadata.dimensions.width;
+    const height = metadata.dimensions.height;
+    let stroke = letteringStrokeRef.current;
+    if (!stroke || stroke.mode !== mode) {
+      stroke = { mode, layer: new Uint8Array(width * height) };
+      letteringStrokeRef.current = stroke;
+      if (mode === 'add') {
+        setLetteringManualAdds((previous) => [...previous, stroke!.layer]);
+      } else {
+        setLetteringManualExcludes((previous) => [...previous, stroke!.layer]);
+      }
+    }
+    const layer = stroke.layer;
+    const r = Math.max(1, Math.round(radius));
+    const r2 = r * r;
+    for (let dy = -r; dy <= r; dy += 1) {
+      for (let dx = -r; dx <= r; dx += 1) {
+        if (dx * dx + dy * dy > r2) continue;
+        const px = x + dx;
+        const py = y + dy;
+        if (px < 0 || py < 0 || px >= width || py >= height) continue;
+        layer[py * width + px] = 1;
+      }
     }
   }
 
@@ -1229,6 +1437,11 @@ export function App() {
     // Also derive panel reading order (LTR/RTL) for mapping.
     let bubbles = result.bubbles;
     let order: readonly string[] | null = null;
+    let panels: readonly {
+      id: string;
+      bounds: { x: number; y: number; width: number; height: number };
+      label?: string;
+    }[] = [];
     const role = pair.cleaned ? 'cleaned' : 'original';
     const pageBlob = sourceBlobs[role];
     const pageMeta = pair[role];
@@ -1295,6 +1508,16 @@ export function App() {
         );
         order = panelOrder.readingOrder;
         setReadingOrder(order);
+        panels = panelOrder.panels.map((panel) => ({
+          id: panel.id,
+          bounds: {
+            x: panel.bounds.x,
+            y: panel.bounds.y,
+            width: panel.bounds.width,
+            height: panel.bounds.height,
+          },
+          label: panel.id,
+        }));
       } catch {
         // Hybrid/panel analysis is an enhancement; keep server bubbles if it fails.
       }
@@ -1304,6 +1527,11 @@ export function App() {
       bubbles,
       ...(previous?.textRegions ? { textRegions: previous.textRegions } : {}),
       ...(previous?.confidences ? { confidences: previous.confidences } : {}),
+      ...(panels.length > 0
+        ? { panels }
+        : previous?.panels
+          ? { panels: previous.panels }
+          : {}),
       ocr: previous?.ocr ?? result.ocr,
     }));
     setProjectMessage(
@@ -2201,7 +2429,244 @@ export function App() {
     setAudioSessionRevision((revision) => revision + 1);
     setActiveProject(projectService.newProject(name.trim()));
     setProjectMessage(`Created “${name.trim()}”.`);
+    setProjectPages([]);
+    setActivePageId(null);
   }
+
+  function captureActivePage(): PageWorkspace | null {
+    const id = activePageId;
+    if (!id) return null;
+    const existing = projectPages.find((page) => page.id === id);
+    return {
+      id,
+      label: existing?.label ?? 'Page',
+      original: pair.original,
+      cleaned: pair.cleaned,
+      originalBlob: sourceBlobs.original ?? null,
+      cleanedBlob: sourceBlobs.cleaned ?? null,
+      editor: editorDocument,
+      panels: pageAnalysis?.panels ?? existing?.panels ?? [],
+      ...(existing?.pacingOverride
+        ? { pacingOverride: existing.pacingOverride }
+        : {}),
+    };
+  }
+
+  async function flushActivePage(): Promise<void> {
+    const captured = captureActivePage();
+    if (!captured) return;
+    setProjectPages((pages) => replacePage(pages, captured));
+  }
+
+  async function activatePage(pageId: string) {
+    if (pageId === activePageId) return;
+    await flushActivePage();
+    const target = projectPages.find((page) => page.id === pageId);
+    if (!target) return;
+    // Load target into the single-page workspace.
+    const nextUrls: Partial<Record<SourceImageRole, string>> = {};
+    const nextBlobs: Partial<Record<SourceImageRole, Blob>> = {};
+    if (target.originalBlob && target.original) {
+      nextUrls.original = URL.createObjectURL(target.originalBlob);
+      nextBlobs.original = target.originalBlob;
+    }
+    if (target.cleanedBlob && target.cleaned) {
+      nextUrls.cleaned = URL.createObjectURL(target.cleanedBlob);
+      nextBlobs.cleaned = target.cleanedBlob;
+    }
+    Object.values(urlRef.current).forEach((url) => {
+      if (url) URL.revokeObjectURL(url);
+    });
+    setSourceUrls(nextUrls);
+    setSourceBlobs(nextBlobs);
+    setPair({
+      original: target.original,
+      cleaned: target.cleaned,
+      dimensionsMatch:
+        target.original && target.cleaned
+          ? target.original.dimensions.width ===
+              target.cleaned.dimensions.width &&
+            target.original.dimensions.height ===
+              target.cleaned.dimensions.height
+          : null,
+    });
+    setEditorDocument(target.editor);
+    setLoadedEditorDocument(target.editor);
+    setPageAnalysis(
+      target.panels.length > 0
+        ? {
+            bubbles: target.editor
+              ? Object.values(target.editor.bubbles).map((bubble) => ({
+                  id: bubble.id,
+                  kind: bubble.kind,
+                  confidence: bubble.confidence ?? 1,
+                  polygon: bubble.polygon,
+                  tail: bubble.tail
+                    ? bubble.tail.points.map((point) => ({
+                        x: point.x,
+                        y: point.y,
+                      }))
+                    : null,
+                }))
+              : [],
+            panels: target.panels,
+            ocr: { blocks: [] },
+          }
+        : null,
+    );
+    setActivePageId(target.id);
+    setProjectMessage(`Editing “${target.label}”.`);
+  }
+
+  async function addEmptyPage() {
+    await flushActivePage();
+    const page = createPageWorkspace(
+      `Page ${projectPages.length + 1}`,
+    );
+    setProjectPages((pages) => [...pages, page]);
+    setActivePageId(page.id);
+    Object.values(urlRef.current).forEach((url) => {
+      if (url) URL.revokeObjectURL(url);
+    });
+    setSourceUrls({});
+    setSourceBlobs({});
+    setPair(emptyPair);
+    setEditorDocument(null);
+    setLoadedEditorDocument(null);
+    setPageAnalysis(null);
+    setProjectMessage(`Added “${page.label}”. Import its comic image.`);
+  }
+
+  async function importPageFiles(files: readonly File[]) {
+    await flushActivePage();
+    const created: PageWorkspace[] = [];
+    for (const [index, file] of files.entries()) {
+      const mediaType = (
+        file.type === 'image/jpeg' || file.type === 'image/webp'
+          ? file.type
+          : 'image/png'
+      ) as SourceImageMetadata['mediaType'];
+      const format: SourceImageMetadata['format'] =
+        mediaType === 'image/jpeg'
+          ? 'JPEG'
+          : mediaType === 'image/webp'
+            ? 'WEBP'
+            : 'PNG';
+      const metadata: SourceImageMetadata = {
+        id: crypto.randomUUID(),
+        role: 'original',
+        filename: file.name,
+        format,
+        mediaType,
+        sha256: '',
+        sizeBytes: file.size,
+        dimensions: { width: 0, height: 0 },
+      };
+      // Dimensions filled after decode; store blob now so export can use it.
+      const bitmap = await createImageBitmap(file).catch(() => null);
+      const sized: SourceImageMetadata = bitmap
+        ? {
+            ...metadata,
+            dimensions: { width: bitmap.width, height: bitmap.height },
+          }
+        : metadata;
+      bitmap?.close();
+      created.push({
+        ...createPageWorkspace(
+          files.length === 1
+            ? file.name.replace(/\.[^.]+$/, '')
+            : `Page ${projectPages.length + index + 1}`,
+        ),
+        original: sized,
+        originalBlob: file,
+      });
+    }
+    setProjectPages((pages) => [...pages, ...created]);
+    if (created[0]) {
+      setActivePageId(created[0].id);
+      await activatePageFrom(created[0], created);
+      setProjectMessage(
+        `Imported ${created.length} page(s). Active: “${created[0].label}”.`,
+      );
+    }
+  }
+
+  async function activatePageFrom(
+    target: PageWorkspace,
+    registry: readonly PageWorkspace[],
+  ) {
+    const nextUrls: Partial<Record<SourceImageRole, string>> = {};
+    const nextBlobs: Partial<Record<SourceImageRole, Blob>> = {};
+    if (target.originalBlob && target.original) {
+      nextUrls.original = URL.createObjectURL(target.originalBlob);
+      nextBlobs.original = target.originalBlob;
+    }
+    if (target.cleanedBlob && target.cleaned) {
+      nextUrls.cleaned = URL.createObjectURL(target.cleanedBlob);
+      nextBlobs.cleaned = target.cleanedBlob;
+    }
+    Object.values(urlRef.current).forEach((url) => {
+      if (url) URL.revokeObjectURL(url);
+    });
+    setSourceUrls(nextUrls);
+    setSourceBlobs(nextBlobs);
+    setPair({
+      original: target.original,
+      cleaned: target.cleaned,
+      dimensionsMatch:
+        target.original && target.cleaned
+          ? target.original.dimensions.width ===
+              target.cleaned.dimensions.width &&
+            target.original.dimensions.height ===
+              target.cleaned.dimensions.height
+          : null,
+    });
+    setEditorDocument(target.editor);
+    setLoadedEditorDocument(target.editor);
+    setActivePageId(target.id);
+    void registry;
+  }
+
+  const multiPagePlan = useMemo(() => {
+    const pages = [...projectPages];
+    const active = captureActivePage();
+    if (active) {
+      const index = pages.findIndex((page) => page.id === active.id);
+      if (index >= 0) pages[index] = active;
+      else pages.push(active);
+    }
+    const dialoguesByPageId: Record<
+      string,
+      { id: string; bubbleId: string; caption: string; start: number; end: number }[]
+    > = {};
+    for (const page of pages) {
+      if (!page.editor) continue;
+      dialoguesByPageId[page.id] = Object.values(page.editor.dialogues).map(
+        (dialogue) => ({
+          id: dialogue.id,
+          bubbleId: dialogue.bubbleId,
+          caption: dialogue.caption,
+          start: dialogue.start,
+          end: dialogue.end,
+        }),
+      );
+    }
+    return buildMultiPageExportPlan({
+      pages,
+      durationSeconds: Number(audioSource?.metadata.durationSeconds ?? 0) || 0,
+      dialoguesByPageId,
+    });
+    // captureActivePage reads live workspace state via closure; recompute when it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    projectPages,
+    pair,
+    sourceBlobs,
+    editorDocument,
+    activePageId,
+    audioSource,
+    pageAnalysis,
+  ]);
 
   const original = imageLayer('original', pair.original, sourceUrls.original);
   const cleaned = imageLayer('cleaned', pair.cleaned, sourceUrls.cleaned);
@@ -2218,8 +2683,177 @@ export function App() {
       dialogue.start <= audioClock.positionSeconds &&
       audioClock.positionSeconds < dialogue.end,
   );
+  const pagesForTimeline = useMemo(() => {
+    const order = [...projectPages];
+    const active = captureActivePage();
+    if (active) {
+      const index = order.findIndex((page) => page.id === active.id);
+      if (index >= 0) order[index] = active;
+      else order.push(active);
+    }
+    const duration = Number(audioSource?.metadata.durationSeconds ?? 0) || 0;
+    const slice =
+      order.length > 0 && duration > 0
+        ? duration / order.length
+        : Math.max(1, duration);
+    return order.map((page, index) => {
+      const image = page.cleanedBlob ?? page.originalBlob;
+      const meta = page.cleaned ?? page.original;
+      return {
+        id: page.id,
+        label: page.label,
+        width: meta?.dimensions.width ?? 0,
+        height: meta?.dimensions.height ?? 0,
+        startSeconds: index * slice,
+        endSeconds:
+          index === order.length - 1 ? duration || (index + 1) * slice : (index + 1) * slice,
+        thumbnailUrl: image ? URL.createObjectURL(image) : null,
+        selected: page.id === activePageId,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPages, pair, sourceBlobs, activePageId, audioSource]);
+
+  const inspectorSelection: InspectorSelection = useMemo(() => {
+    if (liveSelection?.kind === 'bubble' && liveSelection.bubble) {
+      return {
+        kind: 'bubble',
+        id: liveSelection.bubble.id,
+        label: `Bubble ${liveSelection.bubble.kind}`,
+        ...(liveSelection.bubble.confidence != null
+          ? { confidence: liveSelection.bubble.confidence }
+          : {}),
+        classification: liveSelection.bubble.kind,
+        captionText: liveSelection.caption?.text ?? '',
+        ...(liveSelection.caption?.fontFamily
+          ? { fontFamily: liveSelection.caption.fontFamily }
+          : {}),
+        ...(liveSelection.caption?.fontSizePx != null
+          ? { fontSizePx: liveSelection.caption.fontSizePx }
+          : {}),
+        bounds: liveSelection.bubble.boundingBox,
+        onCaptionTextChange: (value) => {
+          const id = liveSelection.caption?.id ?? liveSelection.dialogueId;
+          if (!id) return;
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-text', {
+              detail: { id, text: value },
+            }),
+          );
+        },
+        onFontSizeChange: (value) => {
+          const id = liveSelection.caption?.id ?? liveSelection.dialogueId;
+          if (!id) return;
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-font', {
+              detail: { id, fontSizePx: value },
+            }),
+          );
+        },
+        onBoundsChange: (bounds) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-bubble-geometry', {
+              detail: { id: liveSelection.bubble!.id, ...bounds },
+            }),
+          ),
+        onClassificationChange: (kind) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-bubble-geometry', {
+              detail: { id: liveSelection.bubble!.id, kind },
+            }),
+          ),
+      };
+    }
+    if (liveSelection?.kind === 'caption' && liveSelection.caption) {
+      const caption = liveSelection.caption;
+      return {
+        kind: 'caption',
+        id: caption.id,
+        text: caption.text,
+        startSeconds: caption.startSeconds,
+        endSeconds: caption.endSeconds,
+        fontFamily: caption.fontFamily,
+        fontSizePx: caption.fontSizePx,
+        onTextChange: (value) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-text', {
+              detail: { id: caption.id, text: value },
+            }),
+          ),
+        onTimeChange: (start, end) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-time', {
+              detail: { id: caption.id, start, end },
+            }),
+          ),
+        onFontSizeChange: (value) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-font', {
+              detail: { id: caption.id, fontSizePx: value },
+            }),
+          ),
+      };
+    }
+    if (timelineSelection?.kind === 'page') {
+      const index = Math.max(
+        0,
+        pagesForTimeline.findIndex((page) => page.id === timelineSelection.id),
+      );
+      const page = pagesForTimeline[index];
+      return {
+        kind: 'page',
+        id: timelineSelection.id,
+        label: page?.label ?? 'Page',
+        width: page?.width ?? 0,
+        height: page?.height ?? 0,
+        durationSeconds: page ? page.endSeconds - page.startSeconds : 0,
+        index,
+      };
+    }
+    if (timelineSelection?.kind === 'audio') {
+      return {
+        kind: 'audio',
+        id: timelineSelection.id,
+        label: String(audioSource?.metadata.filename ?? 'Narration'),
+        durationSeconds:
+          Number(audioSource?.metadata.durationSeconds ?? 0) || 0,
+        mediaType: String(audioSource?.metadata.mediaType ?? 'audio'),
+      };
+    }
+    if (timelineSelection?.kind === 'caption') {
+      const dialogue = reviewDialogues.find(
+        (item) => item.id === timelineSelection.id,
+      );
+      if (dialogue) {
+        return {
+          kind: 'caption',
+          id: dialogue.id,
+          text: dialogue.caption,
+          startSeconds: dialogue.start,
+          endSeconds: dialogue.end,
+          fontFamily: dialogue.fontFamily,
+          fontSizePx: dialogue.fontSizePx,
+        };
+      }
+    }
+    return { kind: 'none' };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    liveSelection,
+    timelineSelection,
+    pagesForTimeline,
+    audioSource,
+    reviewDialogues.length,
+  ]);
+
   const reviewLayouts = (activeProject?.captionLayouts ??
     []) as readonly CaptionLayout[];
+  const videoExportTimeline = useMemo(() => {
+    const document = editorDocumentRef.current;
+    if (!document) return { captions: [], bubbles: [] };
+    return exportTimelineData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ref-based document + activeProject
+  }, [editorDocument, activeProject]);
   const automaticMappings = useMemo(
     () =>
       proposeTranscriptBubbleMappings(
@@ -2332,941 +2966,866 @@ export function App() {
   }
 
   return (
-    <main className="comic-app-shell min-h-screen bg-stone-100 text-stone-900">
-      <div className="comic-app-content mx-auto max-w-7xl">
-        <header className="comic-topbar mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
-          <div className="comic-brand-block">
-            <div className="comic-mark" aria-hidden="true">
-              CC
-            </div>
-            <div>
-              <p className="comic-brand-name">Comic Captioner</p>
-              <h1 className="comic-project-name">
-                {activeProject?.name ?? 'Untitled motion comic'}
-              </h1>
-              <p className="comic-project-status">
-                <span className="comic-status-dot" />
-                {activeProject ? 'Saved locally' : 'Unsaved project'}
-              </p>
-            </div>
-          </div>
-          <div
-            className="comic-header-actions flex flex-wrap items-center gap-2"
-            id="export-actions"
+    <div
+      className="editor-app"
+      data-theme={editorTheme}
+      data-inspector={inspectorOpen ? 'on' : 'off'}
+      data-timeline={timelineCollapsed ? 'collapsed' : 'expanded'}
+    >
+      <header className="editor-toolbar">
+        <div className="editor-toolbar-left">
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Undo"
+            disabled={!canUndo}
+            title={
+              canUndo
+                ? `Undo (${editorHistoryStatus.undoDepth} step${editorHistoryStatus.undoDepth === 1 ? '' : 's'})${editorHistoryStatus.undoPreview[0] ? ` → ${editorHistoryStatus.undoPreview[0]}` : ''}`
+                : 'Undo'
+            }
+            onClick={() => window.dispatchEvent(new CustomEvent('comic-editor-undo'))}
           >
-            <button
-              className="editor-button"
-              onClick={createNewProject}
-              type="button"
-            >
-              New
-            </button>
-            <select
-              aria-label="Open saved project"
-              className="editor-input max-w-48"
-              value=""
-              onChange={(event) => {
-                const id = event.currentTarget.value;
-                if (id)
-                  void projectService
-                    .open(id)
-                    .then(restoreProject)
-                    .catch((cause: unknown) =>
-                      setProjectMessage(
-                        cause instanceof Error
-                          ? cause.message
-                          : 'Could not open project.',
-                      ),
-                    );
-              }}
-            >
-              <option value="">Open…</option>
-              {savedProjects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="editor-button"
-              onClick={() => void saveProject()}
-              type="button"
-            >
-              Save
-            </button>
-            <button
-              className="editor-button"
-              onClick={() => {
-                const name = window.prompt(
-                  'Save project as',
-                  `${activeProject?.name ?? 'Comic'} copy`,
-                );
-                if (name) void saveProjectAs(name);
-              }}
-              type="button"
-            >
-              Save As
-            </button>
-            <button
-              className="editor-button"
-              disabled={!activeProject?.revision}
-              onClick={() => void duplicateProject()}
-              type="button"
-            >
-              Duplicate
-            </button>
-            <button
-              className="editor-button"
-              onClick={() => projectImportRef.current?.click()}
-              type="button"
-            >
-              Import
-            </button>
-            <input
-              ref={projectImportRef}
-              className="sr-only"
-              type="file"
-              accept="application/json,.json"
-              onChange={(event) => {
-                void importProjectFile(event.currentTarget.files?.[0]);
-                event.currentTarget.value = '';
-              }}
-            />
-            <button
-              className="editor-button"
-              disabled={!activeProject}
-              onClick={() => void exportProject()}
-              type="button"
-            >
-              Export
-            </button>
-            <button
-              className="editor-button"
-              disabled={!pair.original || !editorDocument}
-              onClick={() => void exportFrame('png')}
-              type="button"
-            >
-              PNG frame
-            </button>
-            <button
-              className="editor-button"
-              disabled={!pair.original || !editorDocument}
-              onClick={() => void exportFrame('jpeg')}
-              type="button"
-            >
-              JPEG frame
-            </button>
-            <select
-              aria-label="MP4 export resolution"
-              className="editor-input"
-              disabled={mp4Exporting}
-              value={mp4Resolution}
-              onChange={(event) =>
-                setMp4Resolution(event.currentTarget.value as Mp4Resolution)
-              }
-            >
-              <option value="720p">MP4 · 720p</option>
-              <option value="1080p">MP4 · 1080p</option>
-              <option value="custom">MP4 · Custom</option>
-            </select>
-            {mp4Resolution === 'custom' && (
-              <span className="flex items-center gap-1">
-                <input
-                  aria-label="Custom video width"
-                  className="editor-input w-20"
-                  type="number"
-                  min="16"
-                  max="7680"
-                  step="2"
-                  value={customVideoWidth}
-                  onChange={(event) =>
-                    setCustomVideoWidth(event.currentTarget.value)
-                  }
-                />
-                <span>×</span>
-                <input
-                  aria-label="Custom video height"
-                  className="editor-input w-20"
-                  type="number"
-                  min="16"
-                  max="7680"
-                  step="2"
-                  value={customVideoHeight}
-                  onChange={(event) =>
-                    setCustomVideoHeight(event.currentTarget.value)
-                  }
-                />
+            <IconUndo />
+            {editorHistoryStatus.undoDepth > 0 ? (
+              <span
+                style={{
+                  marginLeft: 2,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  color: 'var(--ui-accent)',
+                }}
+              >
+                {editorHistoryStatus.undoDepth}
               </span>
-            )}
-            {!mp4Exporting ? (
-              <button
-                className="editor-button"
-                disabled={
-                  (!pair.original && !pair.cleaned) ||
-                  !audioSource?.blob ||
-                  !editorDocument ||
-                  autoCleanBusy
-                }
-                onClick={() => void exportVideo()}
-                type="button"
+            ) : null}
+          </button>
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Redo"
+            disabled={!canRedo}
+            title={
+              canRedo
+                ? `Redo (${editorHistoryStatus.redoDepth} step${editorHistoryStatus.redoDepth === 1 ? '' : 's'})${editorHistoryStatus.redoPreview[0] ? ` → ${editorHistoryStatus.redoPreview[0]}` : ''}`
+                : 'Redo'
+            }
+            onClick={() => window.dispatchEvent(new CustomEvent('comic-editor-redo'))}
+          >
+            <IconRedo />
+            {editorHistoryStatus.redoDepth > 0 ? (
+              <span
+                style={{
+                  marginLeft: 2,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  color: 'var(--ui-accent)',
+                }}
               >
-                Export MP4
-              </button>
-            ) : (
-              <button
-                className="editor-button"
-                onClick={() => mp4AbortRef.current?.abort()}
-                type="button"
+                {editorHistoryStatus.redoDepth}
+              </span>
+            ) : null}
+          </button>
+          {editorHistoryStatus.undoDepth + editorHistoryStatus.redoDepth > 0 ? (
+            <details
+              style={{ position: 'relative' }}
+              title="Undo / redo stack"
+            >
+              <summary
+                className="ui-btn icon"
+                style={{ listStyle: 'none', cursor: 'pointer' }}
+                aria-label="History stack"
               >
-                Cancel export
-              </button>
-            )}
-            {mp4Progress && (
+                ≡
+              </summary>
               <div
-                className="flex min-w-48 items-center gap-2"
-                aria-live="polite"
-              >
-                <progress
-                  aria-label="MP4 export progress"
-                  className="w-28"
-                  max="100"
-                  value={mp4Progress.percent}
-                />
-                <span className="text-xs tabular-nums">
-                  {Math.floor(mp4Progress.percent)}% ·{' '}
-                  {mp4Progress.currentTime.toFixed(1)}s /{' '}
-                  {mp4Progress.duration.toFixed(1)}s
-                </span>
-              </div>
-            )}
-          </div>
-          <div className="comic-import-toolbar flex flex-wrap gap-3">
-            <ImageUploadControl
-              busy={busyRole === 'original'}
-              label="Original comic"
-              onSelect={(file) => void importImage('original', file)}
-            />
-            <button
-              className="rounded-xl border border-indigo-200 bg-white px-4 py-3 text-sm font-semibold text-indigo-800 shadow-sm transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!pair.original || !pair.cleaned || alignmentBusy}
-              onClick={() => void runAlignment()}
-              type="button"
-            >
-              {alignmentBusy ? 'Aligning…' : 'Align pages'}
-            </button>
-            <button
-              className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900 shadow-sm hover:bg-emerald-100 disabled:opacity-50"
-              disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
-              onClick={() => void analyzePage()}
-              type="button"
-            >
-              {pageAnalysisBusy ? 'Scanning bubbles…' : 'Detect bubbles'}
-            </button>
-            <button
-              className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-semibold text-sky-900 shadow-sm hover:bg-sky-100 disabled:opacity-50"
-              disabled={
-                (!pair.original && !pair.cleaned) ||
-                ocrStatus?.phase === 'preparing' ||
-                ocrStatus?.phase === 'loading-models' ||
-                ocrStatus?.phase === 'recognizing'
-              }
-              onClick={() => void extractText()}
-              type="button"
-            >
-              {ocrStatus?.phase === 'preparing' ||
-              ocrStatus?.phase === 'loading-models' ||
-              ocrStatus?.phase === 'recognizing'
-                ? 'Extracting text…'
-                : ocrStatus?.phase === 'error'
-                  ? 'Retry local OCR'
-                  : 'Extract text · local OCR'}
-            </button>
-            <button
-              className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-900 shadow-sm hover:bg-indigo-100 disabled:opacity-50"
-              disabled={
-                (!pair.original && !pair.cleaned) ||
-                pageAnalysisBusy ||
-                ocrStatus?.phase === 'preparing' ||
-                ocrStatus?.phase === 'loading-models' ||
-                ocrStatus?.phase === 'recognizing'
-              }
-              onClick={() => void scanAndExtract()}
-              type="button"
-            >
-              Scan + extract
-            </button>
-            <button
-              className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-950 shadow-sm hover:bg-amber-100 disabled:opacity-50"
-              disabled={
-                (!pair.original && !pair.cleaned) ||
-                ocrStatus?.phase === 'preparing' ||
-                ocrStatus?.phase === 'loading-models' ||
-                ocrStatus?.phase === 'recognizing'
-              }
-              onClick={() => void retryEnhancedOCR()}
-              type="button"
-            >
-              Retry with enhanced preprocessing
-            </button>
-            <ImageUploadControl
-              busy={busyRole === 'cleaned'}
-              label="Cleaned comic (optional)"
-              onSelect={(file) => void importImage('cleaned', file)}
-            />
-            <button
-              className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm font-semibold text-violet-900 shadow-sm hover:bg-violet-100 disabled:opacity-50"
-              disabled={!pair.original || autoCleanBusy || busyRole !== null}
-              onClick={() => void autoCleanFromOriginal()}
-              type="button"
-              title="Erase bubble text from the original page automatically. Import a hand-prepared cleaned page anytime to override. Runs automatically when you import an original page."
-            >
-              {autoCleanBusy ? 'Auto-cleaning…' : 'Auto-clean page'}
-            </button>
-            <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm font-medium text-stone-800 shadow-sm">
-              Reading order
-              <select
-                className="rounded border border-stone-300 px-2 py-1 text-sm"
-                value={readingDirection}
-                onChange={(event) => {
-                  setReadingDirection(
-                    event.target.value === 'rtl' ? 'rtl' : 'ltr',
-                  );
+                style={{
+                  position: 'absolute',
+                  top: 36,
+                  left: 0,
+                  zIndex: 60,
+                  minWidth: 200,
+                  maxHeight: 240,
+                  overflow: 'auto',
+                  padding: 8,
+                  border: '1px solid var(--ui-border)',
+                  borderRadius: 10,
+                  background: 'var(--ui-surface)',
+                  boxShadow: 'var(--ui-shadow)',
+                  fontSize: 11,
                 }}
               >
-                <option value="ltr">LTR</option>
-                <option value="rtl">RTL (manga)</option>
-              </select>
-            </label>
-            <label
-              className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-3 text-sm font-medium text-stone-800 shadow-sm"
-              title="ML proposes bubble candidates to boost recall; deterministic geometry always refines and scores the final contour."
-            >
-              Bubble proposals
-              <select
-                className="rounded border border-stone-300 px-2 py-1 text-sm"
-                value={bubbleProposalSource}
-                onChange={(event) => {
-                  setBubbleProposalSource(
-                    event.target.value === 'ml' ? 'ml' : 'heuristic',
-                  );
-                }}
-              >
-                <option value="heuristic">Heuristic</option>
-                <option value="ml">ML (YOLO)</option>
-              </select>
-            </label>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                  History stack
+                </div>
+                {editorHistoryStatus.undoPreview.length === 0 &&
+                editorHistoryStatus.redoPreview.length === 0 ? (
+                  <div style={{ color: 'var(--ui-muted)' }}>No steps</div>
+                ) : (
+                  <>
+                    {editorHistoryStatus.undoPreview.map((label, index) => (
+                      <div
+                        key={`u-${index}-${label}`}
+                        style={{ color: 'var(--ui-muted)', marginBottom: 2 }}
+                      >
+                        ← {label}
+                      </div>
+                    ))}
+                    <div style={{ margin: '6px 0', fontWeight: 700 }}>
+                      Now
+                    </div>
+                    {editorHistoryStatus.redoPreview.map((label, index) => (
+                      <div
+                        key={`r-${index}-${label}`}
+                        style={{ color: 'var(--ui-accent)', marginBottom: 2 }}
+                      >
+                        → {label}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            </details>
+          ) : null}
+        </div>
+        <div className="editor-toolbar-center">
+          <div className="editor-brand">
+            <div className="editor-brand-mark">CC</div>
+            <div className="editor-brand-text">
+              <div className="editor-brand-title">
+                {activeProject?.name ?? 'Untitled motion comic'}
+              </div>
+              <div className="editor-brand-sub">
+                {activeProject
+                  ? `Saved locally · rev ${activeProject.revision}`
+                  : 'Unsaved project'}
+              </div>
+            </div>
           </div>
-          {ocrStatus && (
-            <div
-              className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900"
-              role="status"
-              aria-live="polite"
-            >
-              {ocrStatus.message}
-              {ocrStatus.phase === 'ready' && ocrMetrics && (
-                <span className="ml-2 text-xs">
-                  {ocrMetrics.detectedTextRegions} text regions ·{' '}
-                  {Math.round(ocrMetrics.initializationMs)} ms model init ·{' '}
-                  {Math.round(ocrMetrics.detectionMs)} ms detection ·{' '}
-                  {Math.round(ocrMetrics.recognitionMs)} ms recognition ·{' '}
-                  {Math.round(ocrMetrics.averageConfidence * 100)}% mean
-                  confidence
-                </span>
-              )}
-            </div>
-          )}
-          {ocrReviewItems.length > 0 && (
-            <div
-              className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950"
-              aria-label="OCR confidence review queue"
-            >
-              <div className="font-semibold">
-                OCR review queue · {ocrReviewItems.length} uncertain item(s)
-              </div>
-              <div className="mt-1 max-h-28 space-y-1 overflow-y-auto">
-                {ocrReviewItems.map((item) => (
-                  <div className="flex items-start gap-2 text-xs" key={item.id}>
-                    <span className="tabular-nums font-semibold">
-                      {Math.round(item.confidence * 100)}%
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="font-medium">{item.text || '(empty)'}</span>
-                      <span className="block text-amber-800">{item.reason}</span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </header>
+        </div>
+        <div className="editor-toolbar-right">
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Zoom out"
+            onClick={() => setCanvasZoom((value) => Math.max(25, value - 10))}
+          >
+            <IconZoomOut />
+          </button>
+          <select
+            className="ui-select"
+            aria-label="Canvas zoom"
+            value={String(canvasZoom)}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              if (value === 'auto') setCanvasZoom(100);
+              else setCanvasZoom(Number(value));
+            }}
+          >
+            <option value="auto">Auto</option>
+            <option value="50">50%</option>
+            <option value="75">75%</option>
+            <option value="100">100%</option>
+            <option value="125">125%</option>
+            <option value="150">150%</option>
+          </select>
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Zoom in"
+            onClick={() => setCanvasZoom((value) => Math.min(200, value + 10))}
+          >
+            <IconZoomIn />
+          </button>
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Toggle theme"
+            title="Toggle light/dark theme"
+            onClick={() =>
+              setEditorTheme((value) => (value === 'light' ? 'dark' : 'light'))
+            }
+          >
+            <IconTheme />
+          </button>
+          <button
+            className="ui-btn primary"
+            type="button"
+            disabled={savingProject}
+            onClick={() => {
+              setSavingProject(true);
+              void saveProject().finally(() => setSavingProject(false));
+            }}
+          >
+            <IconSave size={14} /> {savingProject ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            className="ui-btn icon"
+            type="button"
+            aria-label="Toggle inspector"
+            onClick={() => setInspectorOpen((value) => !value)}
+          >
+            <IconLayers />
+          </button>
+        </div>
+      </header>
 
+      <nav className="editor-rail" aria-label="Tools">
+        {(
+          [
+            ['pages', 'Pages', IconPages],
+            ['layers', 'Layers', IconLayers],
+            ['import', 'Import pages', IconUpload],
+            ['audio', 'Narration', IconAudio],
+            ['media', 'Media', IconImage],
+            ['video', 'Composition', IconVideo],
+            ['captions', 'Captions', IconText],
+            ['bubbles', 'Bubbles', IconBubble],
+            ['ocr', 'OCR / Detect', IconOcr],
+            ['export', 'Export', IconSave],
+            ['settings', 'Settings', IconTheme],
+          ] as const
+        ).map(([id, label, RailIcon]) => (
+          <button
+            key={id}
+            type="button"
+            className={`rail-btn ${activeTool === id ? 'active' : ''}`}
+            aria-label={label}
+            aria-pressed={activeTool === id}
+            title={label}
+            onClick={() => {
+              setActiveTool(id);
+              setInspectorOpen(true);
+              if (id === 'settings') {
+                // Inspector Project tab shows theme + project settings.
+                setTimelineSelection(null);
+              }
+            }}
+          >
+            <RailIcon />
+            <span className="tooltip">{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className="editor-stage">
+        <div className="stage-hud">
+          <span>
+            Zoom {canvasZoom}% · {pagesForTimeline.length} page
+            {pagesForTimeline.length === 1 ? '' : 's'}
+          </span>
+          <span>{activeTool}</span>
+        </div>
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            overflow: 'hidden',
+            padding: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+        <div className="canvas-bar" role="toolbar" aria-label="Canvas bar">
+          <button
+            className="ui-btn"
+            type="button"
+            onClick={() => {
+              setCanvasZoom(100);
+              setProjectMessage('Canvas fit to 100%.');
+            }}
+          >
+            Fit
+          </button>
+          <button
+            className="ui-btn"
+            type="button"
+            onClick={() => void addEmptyPage()}
+          >
+            + Add page
+          </button>
+          <button
+            className="ui-btn"
+            type="button"
+            onClick={() => {
+              setActiveTool('pages');
+              setInspectorOpen(true);
+            }}
+          >
+            Page settings
+          </button>
+        </div>
+        {/* IMG.LY-style workspace: tool drawer + canvas. No legacy card stack. */}
         {projectMessage && (
-          <div className="mb-3 flex items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
-            <span>
+          <div
+            className="canvas-bar"
+            role="status"
+            style={{ justifyContent: 'space-between' }}
+          >
+            <span style={{ fontSize: 12, color: 'var(--ui-muted)' }}>
               {projectMessage}
-              {activeProject
-                ? ` · ${activeProject.name} · rev ${activeProject.revision}`
-                : ''}
             </span>
             <button
-              aria-label="Dismiss project message"
+              className="ui-btn icon ghost"
+              type="button"
+              aria-label="Dismiss message"
               onClick={() => setProjectMessage(null)}
             >
               ×
             </button>
           </div>
         )}
-
         {error && (
-          <p
-            className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
-            role="alert"
-          >
-            {error}
-          </p>
-        )}
-
-        {original || cleaned ? (
-          <div className="comic-shell-body">
-            <ToolSidebar />
-            <div className="comic-workspace-column">
-              <EditingWorkspace
-                original={
-                  original
-                    ? { metadata: original.metadata, src: original.src }
-                    : null
-                }
-                cleaned={
-                  cleaned
-                    ? { metadata: cleaned.metadata, src: cleaned.src }
-                    : null
-                }
-                initialDocument={loadedEditorDocument}
-                analysis={pageAnalysis}
-                transcript={savedTranscript}
-                mappingCommand={mappingCommand}
-                audioName={
-                  typeof audioSource?.metadata.filename === 'string'
-                    ? audioSource.metadata.filename
-                    : null
-                }
-                audioAsset={
-                  audioSource
-                    ? {
-                        format: String(audioSource.metadata.format ?? 'audio'),
-                        durationSeconds: Number(
-                          audioSource.metadata.durationSeconds ??
-                            audioClock.durationSeconds,
-                        ),
-                        sizeBytes: Number(
-                          audioSource.metadata.sizeBytes ??
-                            audioSource.blob.size,
-                        ),
-                      }
-                    : null
-                }
-                audioClock={audioClock}
-                hasTranscript={Boolean(savedTranscript)}
-                liveTranscriptText={activeTranscriptSegment?.text ?? ''}
-                onAudioToggle={() => {
-                  void audioControlsRef.current?.toggle();
-                }}
-                onAudioSeek={(timeSeconds) =>
-                  audioControlsRef.current?.seek(timeSeconds)
-                }
-                onAudioImport={() => audioControlsRef.current?.import()}
-                onAutomateSpeech={() => void automateSpeech()}
-                speechAutomationBusy={speechAutomationBusy}
-                speechAutomationReady={Boolean(
-                  original && cleaned && alignment && audioSource,
-                )}
-                readingOrder={readingOrder}
-                onDocumentChange={(value) => {
-                  editorDocumentRef.current = value;
-                  setEditorDocument(value);
-                }}
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="grid gap-5 lg:grid-cols-2">
-            <OriginalViewer image={original} />
-            <CleanedViewer image={cleaned} />
+          <div className="canvas-bar" role="alert">
+            <span style={{ color: 'var(--ui-danger)', fontSize: 12 }}>{error}</span>
           </div>
         )}
-        <details className="mt-5 rounded-xl border border-stone-200 bg-white p-4">
-          <summary className="cursor-pointer font-medium">
-            Compare source images
-          </summary>
-          <div className="mt-4">
-            <ComparisonViewer
-              cleaned={cleaned}
-              dimensionsMatch={pair.dimensionsMatch}
-              onOpacityChange={setOpacity}
-              opacity={opacity}
-              original={original}
-            />
-          </div>
-        </details>
-        <div id="audio-panel" className="comic-secondary-panel">
-          <AudioWorkspace
-            key={audioSessionRevision}
-            initialAudioFile={loadedAudioFile}
-            initialTranscript={savedTranscript}
-            onTranscriptChange={(transcript) => {
-              setSavedTranscript(transcript);
-              setSpeechProposals(null);
-              setSpeechAutomationWarning(null);
-            }}
-            onClockChange={setAudioClock}
-            seekRequest={seekRequest}
-            onAudioControls={(controls) => {
-              audioControlsRef.current = controls;
-            }}
-            onAudioAsset={(asset) =>
-              setAudioSource({
-                metadata: asset.metadata as unknown as Record<string, unknown>,
-                blob: asset.blob,
-              })
-            }
-          />
-        </div>
-        <section
-          id="narration-review"
-          aria-label="Live narration review"
-          className="comic-secondary-panel mt-5 rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm"
+        <div
+          style={{
+            display: 'flex',
+            gap: 12,
+            minHeight: 0,
+            flex: 1,
+            alignItems: 'stretch',
+            marginTop: 10,
+          }}
         >
-          {speechAutomationWarning && (
-            <p
-              className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
-              role="status"
-            >
-              {speechAutomationWarning} Bubble detection and shape fitting still
-              ran; review and select bubble matches manually.
-            </p>
-          )}
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Live narration review</h2>
-              <p className="text-sm text-stone-600">
-                Review captions at their audio time. Captions render in their
-                assigned bubbles using saved fitted layouts.
-              </p>
-            </div>
-            <div className="font-mono text-sm tabular-nums" aria-live="polite">
-              {audioClock.positionSeconds.toFixed(2)}s
-            </div>
-          </div>
-          {activeTranscriptMapping && activeTranscriptSegment && (
-            <div className="my-4 grid gap-3 rounded-lg border border-indigo-200 bg-indigo-50 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wide text-indigo-800">
-                  Transcript at audio time · proposed bubble{' '}
-                  {activeTranscriptMapping.bubbleId ?? 'needs review'}
-                </div>
-                <p className="mt-1 text-lg">{activeTranscriptSegment.text}</p>
-                <p className="mt-1 text-xs text-indigo-900">
-                  {activeTranscriptSegment.interval.start.value.toFixed(2)}–
-                  {activeTranscriptSegment.interval.end.value.toFixed(2)}s ·{' '}
-                  {Math.round(activeTranscriptMapping.confidence * 100)}% match
-                  confidence ·{' '}
-                  {activeTranscriptMapping.reviewFlag.replaceAll('-', ' ')}
-                </p>
-                <p className="mt-1 text-xs text-stone-600">
-                  {activeTranscriptMapping.reasons
-                    .map((reason) => reason.evidence)
-                    .join(' · ')}
-                </p>
-              </div>
-              {!dismissedMappingIds.includes(activeTranscriptMapping.id) && (
-                <button
-                  className="rounded-md bg-indigo-700 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
-                  disabled={
-                    !activeChosenBubbleId ||
-                    Boolean(activeSpeechProposal && !activeProposedFit?.layout)
-                  }
-                  onClick={() => approveLiveMapping(activeTranscriptMapping)}
-                  type="button"
-                >
-                  Approve match + timing
-                </button>
-              )}
-            </div>
-          )}
-          {reviewMappings.some(
-            (mapping) => !dismissedMappingIds.includes(mapping.id),
-          ) && (
-            <details
-              className="mb-4 rounded-lg border border-stone-200 p-3"
-              open={Boolean(
-                activeTranscriptMapping &&
-                !dismissedMappingIds.includes(activeTranscriptMapping.id),
-              )}
-            >
-              <summary className="cursor-pointer text-sm font-semibold">
-                Automatic transcript matches ·{' '}
-                {
-                  reviewMappings.filter(
-                    (mapping) => !dismissedMappingIds.includes(mapping.id),
-                  ).length
-                }{' '}
-                to review
-              </summary>
-              <div className="mt-3 grid gap-2 md:grid-cols-2">
-                {reviewMappings
-                  .filter(
-                    (mapping) => !dismissedMappingIds.includes(mapping.id),
-                  )
-                  .map((mapping) => {
-                    const segment = savedTranscript?.segments.find(
-                      (item) => item.id === mapping.transcriptSegmentId,
-                    );
-                    if (!segment) return null;
-                    const chosenBubbleId =
-                      mappingChoices[mapping.id] ?? mapping.bubbleId ?? '';
-                    const fittedProposal = speechProposals?.find(
-                      (item) => item.mapping.id === mapping.id,
-                    );
-                    const selectedFit = fittedProposal?.candidateLayouts.find(
-                      (candidate) => candidate.bubbleId === chosenBubbleId,
-                    );
-                    const selectedLayoutIsValid =
-                      !fittedProposal ||
-                      Boolean(
-                        selectedFit?.layout ||
-                        fittedProposal.layout?.bubbleId === chosenBubbleId,
-                      );
-                    return (
-                      <article
-                        className="rounded-lg border border-stone-200 bg-white p-3"
-                        key={mapping.id}
-                      >
-                        <p className="text-sm font-medium">{segment.text}</p>
-                        <p className="mt-1 text-xs text-stone-500">
-                          {segment.interval.start.value.toFixed(2)}–
-                          {segment.interval.end.value.toFixed(2)}s ·{' '}
-                          {Math.round(mapping.confidence * 100)}% ·{' '}
-                          {mapping.reviewFlag.replaceAll('-', ' ')}
-                        </p>
-                        {fittedProposal && !selectedLayoutIsValid && (
-                          <p className="mt-1 text-xs text-amber-800">
-                            Select a bubble to preview its caption fit.{' '}
-                            {selectedFit?.fitError ?? fittedProposal.fitError}
-                          </p>
-                        )}
-                        {selectedLayoutIsValid && fittedProposal && (
-                          <p className="mt-1 text-xs text-emerald-700">
-                            Caption fitted to this bubble’s safe region.
-                          </p>
-                        )}
-                        <label className="mt-2 block text-xs">
-                          Bubble
-                          <select
-                            className="editor-input ml-2"
-                            value={chosenBubbleId}
-                            onChange={(event) =>
-                              setMappingChoices((choices) => ({
-                                ...choices,
-                                [mapping.id]: event.currentTarget.value,
-                              }))
-                            }
-                          >
-                            <option value="">No confident match</option>
-                            {mapping.alternatives.map((candidate) => (
-                              <option
-                                key={candidate.bubbleId}
-                                value={candidate.bubbleId}
-                              >
-                                {candidate.bubbleId} ·{' '}
-                                {Math.round(candidate.confidence * 100)}%
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <div className="mt-2 flex gap-2">
-                          <button
-                            className="rounded border border-indigo-300 px-2 py-1 text-xs text-indigo-800 hover:bg-indigo-50"
-                            onClick={() =>
-                              setSeekRequest((previous) => ({
-                                time: segment.interval.start.value,
-                                revision: (previous?.revision ?? 0) + 1,
-                              }))
-                            }
-                            type="button"
-                          >
-                            Preview at {segment.interval.start.value.toFixed(1)}
-                            s
-                          </button>
-                          <button
-                            className="rounded bg-indigo-700 px-2 py-1 text-xs font-semibold text-white disabled:opacity-40"
-                            disabled={!chosenBubbleId || !selectedLayoutIsValid}
-                            onClick={() =>
-                              approveLiveMapping({
-                                ...mapping,
-                                bubbleId:
-                                  chosenBubbleId as typeof mapping.bubbleId,
-                              })
-                            }
-                            type="button"
-                          >
-                            Approve text + timing
-                          </button>
-                          <button
-                            className="rounded border border-stone-300 px-2 py-1 text-xs"
-                            onClick={() =>
-                              setDismissedMappingIds((ids) => [
-                                ...ids,
-                                mapping.id,
-                              ])
-                            }
-                            type="button"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-              </div>
-            </details>
-          )}
-          {cleaned &&
-          activeReviewLayout &&
-          (activeNarration ||
-            (activeTranscriptMapping?.bubbleId && activeTranscriptSegment)) ? (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-              <LayeredComicRenderer
-                className="mx-auto w-full max-w-3xl overflow-hidden rounded-lg border border-stone-200"
-                src={cleaned.src}
-                width={cleaned.metadata.dimensions.width}
-                height={cleaned.metadata.dimensions.height}
-                layouts={[activeReviewLayout]}
-                motionTimeSeconds={audioClock.positionSeconds}
-                motionStartSeconds={
-                  activeTranscriptSegment?.interval.start.value ??
-                  activeNarration?.start
-                }
-                motionEndSeconds={
-                  activeTranscriptSegment?.interval.end.value ??
-                  activeNarration?.end
-                }
-              />
-              <div className="rounded-lg bg-indigo-50 p-4">
-                <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">
-                  {activeSpeechProposal &&
-                  !dismissedMappingIds.includes(activeSpeechProposal.mapping.id)
-                    ? `Caption proposal · ${Math.round(activeSpeechProposal.mapping.confidence * 100)}% match confidence`
-                    : 'Now narrating'}
-                </div>
-                <p className="mt-2 text-lg">{activeReviewText}</p>
-                <p className="mt-3 text-sm text-stone-600">
-                  {activeTranscriptSegment && activeTranscriptMapping?.bubbleId
-                    ? `${activeTranscriptSegment.interval.start.value.toFixed(2)}s – ${activeTranscriptSegment.interval.end.value.toFixed(2)}s · Proposed match ${Math.round(activeTranscriptMapping.confidence * 100)}%`
-                    : `${activeNarration!.start.toFixed(2)}s – ${activeNarration!.end.toFixed(2)}s · ${activeNarration!.fontFamily}`}{' '}
-                  {activeReviewLayout.fontSizePx}px
-                </p>
-              </div>
-            </div>
-          ) : cleaned ? (
-            <div className="rounded-lg border border-dashed border-stone-300 p-6 text-center text-sm text-stone-600">
-              {activeTranscriptSegment &&
-              activeTranscriptMapping?.bubbleId &&
-              !mappedTranscriptLayout
-                ? `The transcript is matched to bubble ${activeTranscriptMapping.bubbleId} at this audio time, but no saved fitted layout exists for this exact transcript text yet.`
-                : activeTranscriptSegment && !activeTranscriptMapping?.bubbleId
-                  ? 'A transcript segment is active, but the automatic mapper found no confident bubble match. Review its alternatives below.'
-                  : activeNarration
-                    ? 'This narration event has no saved fitted layout yet. Fit and save its caption layout to review it here.'
-                    : reviewDialogues.length
-                      ? 'No caption is active at this audio time. Use the event list below to jump to a narration.'
-                      : 'Add dialogue events and fitted caption layouts to start narration review.'}
-            </div>
-          ) : (
-            <p className="rounded-lg border border-dashed border-stone-300 p-6 text-center text-sm text-stone-600">
-              Import a cleaned comic page to review narration in context.
-            </p>
-          )}
-          <div className="mt-4">
-            <h3 className="mb-2 text-sm font-semibold">Narration events</h3>
-            {reviewDialogues.length ? (
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {reviewDialogues.map((dialogue) => {
-                  const isActive = dialogue.id === activeNarration?.id;
-                  const hasLayout = reviewLayouts.some(
-                    (layout) =>
-                      layout.bubbleId === dialogue.bubbleId &&
-                      layout.text === dialogue.caption,
-                  );
-                  return (
+          <ToolDrawer
+            tool={activeTool}
+            onClose={() => setActiveTool('canvas')}
+          >
+            {(activeTool === 'pages' || activeTool === 'layers' || activeTool === 'canvas') && (
+              <ToolDrawerSection title="Page strip">
+                <ToolDrawerRow>
+                  <button className="ui-btn" type="button" onClick={() => void addEmptyPage()}>
+                    + Add page
+                  </button>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    onClick={() => pageImportInputRef.current?.click()}
+                  >
+                    Import…
+                  </button>
+                  <input
+                    ref={pageImportInputRef}
+                    className="ui-sr"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => {
+                      const files = [...(event.currentTarget.files ?? [])];
+                      event.currentTarget.value = '';
+                      if (files.length > 0) void importPageFiles(files);
+                    }}
+                  />
+                </ToolDrawerRow>
+                <ToolDrawerRow stacked>
+                  {pagesForTimeline.map((page, index) => (
                     <button
-                      className={`min-w-52 rounded-lg border p-3 text-left text-sm ${isActive ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-300' : 'border-stone-200 bg-white hover:bg-stone-50'}`}
-                      key={dialogue.id}
-                      onClick={() =>
-                        setSeekRequest((previous) => ({
-                          time: dialogue.start,
-                          revision: (previous?.revision ?? 0) + 1,
-                        }))
-                      }
+                      key={page.id}
                       type="button"
+                      className={`page-chip ${page.id === activePageId ? 'selected' : ''}`}
+                      onClick={() => void activatePage(page.id)}
                     >
-                      <span className="block font-medium">
-                        {dialogue.caption || 'Untitled dialogue'}
-                      </span>
-                      <span className="mt-1 block text-xs text-stone-500">
-                        {dialogue.start.toFixed(2)}–{dialogue.end.toFixed(2)}s ·{' '}
-                        {hasLayout ? 'fitted' : 'layout needed'}
-                      </span>
+                      {index + 1}. {page.label}
                     </button>
-                  );
-                })}
+                  ))}
+                  {pagesForTimeline.length === 0 ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      No pages yet.
+                    </p>
+                  ) : null}
+                </ToolDrawerRow>
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'import' && (
+              <ToolDrawerSection title="Import">
+                <ToolDrawerRow stacked>
+                  <ImageUploadControl
+                    busy={busyRole === 'original'}
+                    label="Original page"
+                    onSelect={(file) => void importImage('original', file)}
+                  />
+                  <ImageUploadControl
+                    busy={busyRole === 'cleaned'}
+                    label="Cleaned page (optional)"
+                    onSelect={(file) => void importImage('cleaned', file)}
+                  />
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={!pair.original || autoCleanBusy || busyRole !== null}
+                    onClick={() => void autoCleanFromOriginal()}
+                  >
+                    {autoCleanBusy ? 'Auto-cleaning…' : 'Auto-clean page'}
+                  </button>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={!pair.original || !pair.cleaned || alignmentBusy}
+                    onClick={() => void runAlignment()}
+                  >
+                    {alignmentBusy ? 'Aligning…' : 'Align pages'}
+                  </button>
+                </ToolDrawerRow>
+                {pair.original && (
+                  <ToolDrawerRow stacked>
+                    <LetteringCleanupReview
+                      originalUrl={sourceUrls.original ?? null}
+                      cleanedUrl={sourceUrls.cleaned ?? null}
+                      maskUrl={letteringMaskUrl}
+                      result={letteringResult}
+                      busy={autoCleanBusy || pageAnalysisBusy}
+                      accepted={letteringAccepted}
+                      showMask={showRemovalMask}
+                      maskEditMode={letteringMaskEdit}
+                      pageWidth={pair.original.dimensions.width}
+                      pageHeight={pair.original.dimensions.height}
+                      onToggleMask={() => setShowRemovalMask((value) => !value)}
+                      onSetMaskEditMode={(mode) => setLetteringMaskEdit(mode)}
+                      onPaintMask={(mode, x, y, radius) =>
+                        paintLetteringMask(mode, x, y, radius)
+                      }
+                      onApplyMaskEdits={() => {
+                        letteringStrokeRef.current = null;
+                        void reprocessLettering();
+                      }}
+                      onReprocessRegion={(regionId) => {
+                        void reprocessLettering({ regionIds: [regionId] });
+                      }}
+                      onApproveRegions={(regionIds) => {
+                        const approved = [
+                          ...new Set([...letteringApprovedIds, ...regionIds]),
+                        ];
+                        setLetteringApprovedIds(approved);
+                        void reprocessLettering({
+                          regionIds,
+                          approvedRegionIds: approved,
+                          erasureScope: 'approved',
+                        });
+                      }}
+                      onResetEdits={() => {
+                        letteringStrokeRef.current = null;
+                        setLetteringManualAdds([]);
+                        setLetteringManualExcludes([]);
+                        setLetteringApprovedIds([]);
+                        void reprocessLettering({
+                          manualAdds: [],
+                          manualExcludes: [],
+                          approvedRegionIds: [],
+                          resetApproved: true,
+                        });
+                      }}
+                      onAccept={() => {
+                        setLetteringAccepted(true);
+                        setProjectMessage('Clean page accepted.');
+                      }}
+                      onReject={() => {
+                        setLetteringAccepted(false);
+                        setLetteringResult(null);
+                        setProjectMessage('Clean page rejected.');
+                      }}
+                    />
+                  </ToolDrawerRow>
+                )}
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'ocr' && (
+              <ToolDrawerSection title="Detect">
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn primary"
+                    type="button"
+                    disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
+                    onClick={() => void detectBubbles()}
+                  >
+                    {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
+                  </button>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={!pair.original || pageAnalysisBusy}
+                    onClick={() => void analyzePage()}
+                  >
+                    Analyze page
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                    onClick={() => void extractText()}
+                  >
+                    Extract text
+                  </button>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                    onClick={() => void scanAndExtract()}
+                  >
+                    Scan + extract
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                    onClick={() => void retryEnhancedOCR()}
+                  >
+                    Enhanced OCR
+                  </button>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={speechAutomationBusy || !audioSource?.blob}
+                    onClick={() => void automateSpeech()}
+                  >
+                    {speechAutomationBusy ? 'Running…' : 'Auto everything'}
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow>
+                  <label className="inspector-label">
+                    Reading order
+                    <select
+                      className="ui-select"
+                      value={readingDirection}
+                      onChange={(event) =>
+                        setReadingDirection(event.currentTarget.value as 'ltr' | 'rtl')
+                      }
+                    >
+                      <option value="ltr">LTR</option>
+                      <option value="rtl">RTL (manga)</option>
+                    </select>
+                  </label>
+                </ToolDrawerRow>
+                {ocrStatus ? (
+                  <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>{ocrStatus.message}</p>
+                ) : null}
+                {ocrReviewItems.length > 0 ? (
+                  <p style={{ fontSize: 11, color: 'var(--ui-accent)' }}>
+                    OCR review queue · {ocrReviewItems.length}
+                  </p>
+                ) : null}
+                {alignment && original && textDebugUrl != null && (
+                  <ToolDrawerRow stacked>
+                    <TextDifferenceReview
+                      debugUrl={textDebugUrl}
+                      image={original}
+                      onDetect={() => void detectRemovedText()}
+                      regions={textRegions}
+                      running={textDetectionBusy}
+                    />
+                  </ToolDrawerRow>
+                )}
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'captions' && (
+              <ToolDrawerSection title="Captions">
+                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                  Select a bubble or caption on the canvas to edit text and timing.
+                </p>
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'bubbles' && (
+              <ToolDrawerSection title="Bubbles">
+                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                  Detected speech bubbles appear on the canvas. Select one to edit bounds and class.
+                </p>
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'audio' && (
+              <ToolDrawerSection title="Narration">
+                <ToolDrawerRow>
+                  <span className="inspector-label">
+                    {String(audioSource?.metadata.filename ?? 'No audio loaded')}
+                  </span>
+                </ToolDrawerRow>
+                {audioSource ? (
+                  <ToolDrawerRow>
+                    <span className="inspector-label">
+                      {Number(audioSource.metadata.durationSeconds ?? 0).toFixed(2)}s
+                    </span>
+                  </ToolDrawerRow>
+                ) : null}
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'export' && (
+              <ToolDrawerSection title="Export">
+                <ToolDrawerRow stacked>
+                  <button
+                    className="ui-btn"
+                    disabled={!activeProject}
+                    onClick={() => void exportProject()}
+                  >
+                    Project archive
+                  </button>
+                  <button
+                    className="ui-btn"
+                    disabled={!pair.original || !editorDocument}
+                    onClick={() => void exportFrame('png')}
+                  >
+                    PNG frame
+                  </button>
+                  <button
+                    className="ui-btn primary"
+                    disabled={
+                      (!pair.original && !pair.cleaned) ||
+                      !audioSource?.blob ||
+                      !editorDocument ||
+                      autoCleanBusy
+                    }
+                    onClick={() => void exportVideo()}
+                  >
+                    {mp4Exporting ? 'Exporting MP4…' : 'Export MP4 (FFmpeg)'}
+                  </button>
+                  <VideoExportPanel
+                    pageBlob={sourceBlobs.cleaned ?? sourceBlobs.original ?? null}
+                    pageWidth={
+                      pair.cleaned?.dimensions.width ??
+                      pair.original?.dimensions.width ??
+                      1280
+                    }
+                    pageHeight={
+                      pair.cleaned?.dimensions.height ??
+                      pair.original?.dimensions.height ??
+                      720
+                    }
+                    audioBlob={audioSource?.blob ?? null}
+                    audioFormat={String(audioSource?.metadata.format ?? 'wav')}
+                    durationSeconds={
+                      Number(audioSource?.metadata.durationSeconds ?? 0) || 0
+                    }
+                    captions={videoExportTimeline.captions}
+                    bubbles={videoExportTimeline.bubbles}
+                    panels={pageAnalysis?.panels ?? []}
+                    sourcePages={multiPagePlan.sourcePages}
+                    multiPageWarnings={multiPagePlan.warnings}
+                    projectName={activeProject?.name ?? 'comic'}
+                    disabled={mp4Exporting || autoCleanBusy}
+                    onMessage={setProjectMessage}
+                  />
+                </ToolDrawerRow>
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'settings' && (
+              <ToolDrawerSection title="Project">
+                <ToolDrawerRow stacked>
+                  <button className="ui-btn" onClick={createNewProject} type="button">
+                    New project
+                  </button>
+                  <select
+                    aria-label="Open saved project"
+                    className="ui-select"
+                    value=""
+                    onChange={(event) => {
+                      const id = event.currentTarget.value;
+                      if (id)
+                        void projectService
+                          .open(id)
+                          .then(restoreProject)
+                          .catch((cause: unknown) =>
+                            setProjectMessage(
+                              cause instanceof Error
+                                ? cause.message
+                                : 'Could not open project.',
+                            ),
+                          );
+                    }}
+                  >
+                    <option value="">Open…</option>
+                    {savedProjects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="ui-btn"
+                    disabled={!activeProject?.revision}
+                    onClick={() => void duplicateProject()}
+                    type="button"
+                  >
+                    Duplicate
+                  </button>
+                  <button
+                    className="ui-btn"
+                    onClick={() => projectImportRef.current?.click()}
+                    type="button"
+                  >
+                    Import archive
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    onClick={() =>
+                      setEditorTheme((value) => (value === 'light' ? 'dark' : 'light'))
+                    }
+                  >
+                    Theme: {editorTheme}
+                  </button>
+                </ToolDrawerRow>
+              </ToolDrawerSection>
+            )}
+            {activeTool === 'media' || activeTool === 'video' ? (
+              <ToolDrawerSection title="Workspace">
+                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                  Use Pages and Import tools to build the multi-page sequence. Canvas shows the active page.
+                </p>
+              </ToolDrawerSection>
+            ) : null}
+          </ToolDrawer>
+
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+            {original || cleaned ? (
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  overflow: 'auto',
+                  border: '1px solid var(--ui-border)',
+                  borderRadius: 12,
+                  background: 'var(--ui-surface)',
+                }}
+              >
+                <EditingWorkspace
+                  original={
+                    original
+                      ? { metadata: original.metadata, src: original.src }
+                      : null
+                  }
+                  cleaned={
+                    cleaned
+                      ? { metadata: cleaned.metadata, src: cleaned.src }
+                      : null
+                  }
+                  initialDocument={loadedEditorDocument}
+                  analysis={pageAnalysis}
+                  transcript={savedTranscript}
+                  mappingCommand={mappingCommand}
+                  audioName={
+                    typeof audioSource?.metadata.filename === 'string'
+                      ? audioSource.metadata.filename
+                      : null
+                  }
+                  audioAsset={
+                    audioSource
+                      ? {
+                          format: String(audioSource.metadata.format ?? 'audio'),
+                          durationSeconds: Number(
+                            audioSource.metadata.durationSeconds ??
+                              audioClock.durationSeconds,
+                          ),
+                          sizeBytes: Number(
+                            audioSource.metadata.sizeBytes ??
+                              audioSource.blob.size,
+                          ),
+                        }
+                      : null
+                  }
+                  audioClock={audioClock}
+                  hasTranscript={Boolean(savedTranscript)}
+                  liveTranscriptText={activeTranscriptSegment?.text ?? ''}
+                  onAudioToggle={() => {
+                    void audioControlsRef.current?.toggle();
+                  }}
+                  onAudioSeek={(timeSeconds) =>
+                    audioControlsRef.current?.seek(timeSeconds)
+                  }
+                  onDocumentChange={setEditorDocument}
+                />
               </div>
             ) : (
-              <p className="text-sm text-stone-500">No dialogue events yet.</p>
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: '1px solid var(--ui-border)',
+                  borderRadius: 12,
+                  background: 'var(--ui-surface)',
+                  color: 'var(--ui-muted)',
+                }}
+              >
+                Import a comic page to edit bubbles and captions on the canvas.
+              </div>
             )}
           </div>
-        </section>
-        {alignment && alignmentImages && original && (
-          <AlignmentReview
-            alignment={alignment}
-            image={{ ...original, src: alignmentImages[alignmentMode] }}
-            mode={alignmentMode}
-            onModeChange={setAlignmentMode}
-            onSave={saveManualAlignment}
-          />
-        )}
-        {alignment && original && (
-          <TextDifferenceReview
-            debugUrl={textDebugUrl}
-            image={original}
-            onDetect={() => void detectRemovedText()}
-            regions={textRegions}
-            running={textDetectionBusy}
-          />
-        )}
-        {pair.original && (
-          <LetteringCleanupReview
-            originalUrl={sourceUrls.original ?? null}
-            cleanedUrl={sourceUrls.cleaned ?? null}
-            maskUrl={letteringMaskUrl}
-            result={letteringResult}
-            busy={autoCleanBusy || pageAnalysisBusy}
-            accepted={letteringAccepted}
-            showMask={showRemovalMask}
-            maskEditMode={letteringMaskEdit}
-            pageWidth={pair.original.dimensions.width}
-            pageHeight={pair.original.dimensions.height}
-            onToggleMask={() => setShowRemovalMask((value) => !value)}
-            onSetMaskEditMode={(mode) => setLetteringMaskEdit(mode)}
-            onPaintMask={(mode, x, y, radius) => {
-              const width = pair.original!.dimensions.width;
-              const height = pair.original!.dimensions.height;
-              const layer = new Uint8Array(width * height);
-              const r = Math.max(1, radius);
-              for (let dy = -r; dy <= r; dy += 1) {
-                for (let dx = -r; dx <= r; dx += 1) {
-                  if (dx * dx + dy * dy > r * r) continue;
-                  const px = x + dx;
-                  const py = y + dy;
-                  if (px < 0 || py < 0 || px >= width || py >= height) continue;
-                  layer[py * width + px] = 1;
-                }
-              }
-              if (mode === 'add') {
-                setLetteringManualAdds((previous) => [...previous, layer]);
-              } else {
-                setLetteringManualExcludes((previous) => [...previous, layer]);
-              }
-            }}
-            onApplyMaskEdits={() => {
-              const role =
-                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
-              const blob = sourceBlobs[role];
-              const meta = pair[role];
-              if (!blob || !meta) return;
-              void blob.arrayBuffer().then((buffer) => {
-                void runLetteringRemoval({
-                  imageBytes: new Uint8Array(buffer),
-                  width: meta.dimensions.width,
-                  height: meta.dimensions.height,
-                  erasureScope: letteringApprovedIds.length
-                    ? 'approved'
-                    : 'bubble-interior',
-                  approvedRegionIds: letteringApprovedIds,
-                });
-              });
-              setLetteringMaskEdit('idle');
-            }}
-            onReprocessRegion={(regionId) => {
-              const role =
-                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
-              const blob = sourceBlobs[role];
-              const meta = pair[role];
-              if (!blob || !meta) return;
-              void blob.arrayBuffer().then((buffer) => {
-                void runLetteringRemoval({
-                  imageBytes: new Uint8Array(buffer),
-                  width: meta.dimensions.width,
-                  height: meta.dimensions.height,
-                  regionIds: [regionId],
-                  erasureScope: letteringApprovedIds.includes(regionId)
-                    ? 'approved'
-                    : 'bubble-interior',
-                  approvedRegionIds: letteringApprovedIds,
-                });
-              });
-            }}
-            onApproveRegions={(regionIds) => {
-              const next = [
-                ...new Set([...letteringApprovedIds, ...regionIds]),
-              ];
-              setLetteringApprovedIds(next);
-              const role =
-                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
-              const blob = sourceBlobs[role];
-              const meta = pair[role];
-              if (!blob || !meta) return;
-              void blob.arrayBuffer().then((buffer) => {
-                void runLetteringRemoval({
-                  imageBytes: new Uint8Array(buffer),
-                  width: meta.dimensions.width,
-                  height: meta.dimensions.height,
-                  erasureScope: 'approved',
-                  approvedRegionIds: next,
-                });
-              });
-            }}
-            onAccept={() => {
-              setLetteringAccepted(true);
-              setProjectMessage(
-                'Clean page accepted. The original page remains unchanged in project assets.',
-              );
-            }}
-            onReject={() => {
-              setLetteringAccepted(false);
-              setLetteringResult(null);
-              setLetteringApprovedIds([]);
-              setProjectMessage(
-                'Clean page rejected. Review masks and reprocess.',
-              );
-            }}
-            onResetEdits={() => {
-              setLetteringManualAdds([]);
-              setLetteringManualExcludes([]);
-              setLetteringApprovedIds([]);
-              setLetteringMaskEdit('idle');
-              setProjectMessage(
-                'Manual mask edits and approvals cleared. Automatic detections are unchanged.',
-              );
-            }}
-          />
-        )}
-        <p className="mt-6 text-center text-xs text-stone-500">
-          Saved projects and their binary assets are stored locally in this
-          browser. Export a project archive to move it to another browser or
-          device.
-        </p>
+        </div>
+        </div>
       </div>
-    </main>
+
+      <EditorInspector
+        selection={inspectorSelection}
+        theme={editorTheme}
+        onThemeChange={setEditorTheme}
+        projectName={activeProject?.name ?? 'Untitled motion comic'}
+        pageCount={pagesForTimeline.length}
+        durationSeconds={Number(audioSource?.metadata.durationSeconds ?? 0) || 0}
+        fps={24}
+        onClose={() => setInspectorOpen(false)}
+      />
+
+      <EditorTimeline
+        durationSeconds={
+          Number(audioSource?.metadata.durationSeconds ?? 0) ||
+          Math.max(
+            1,
+            pagesForTimeline[pagesForTimeline.length - 1]?.endSeconds ?? 1,
+          )
+        }
+        currentTime={audioClock.positionSeconds}
+        playing={audioClock.status === 'playing'}
+        collapsed={timelineCollapsed}
+        heightPx={timelineHeight}
+        zoom={timelineZoom}
+        pages={pagesForTimeline}
+        audioClips={
+          audioSource
+            ? [
+                {
+                  id: 'narration',
+                  label: String(audioSource.metadata.filename ?? 'Narration'),
+                  startSeconds: 0,
+                  endSeconds:
+                    Number(audioSource.metadata.durationSeconds ?? 0) || 1,
+                  selected: timelineSelection?.kind === 'audio',
+                },
+              ]
+            : []
+        }
+        captions={reviewDialogues.map((dialogue) => ({
+          id: dialogue.id,
+          label: dialogue.caption.slice(0, 24) || 'Caption',
+          startSeconds: dialogue.start,
+          endSeconds: dialogue.end,
+          selected:
+            timelineSelection?.kind === 'caption' &&
+            timelineSelection.id === dialogue.id,
+        }))}
+        selectedClipId={timelineSelection?.id ?? null}
+        onSeek={(time) =>
+          setSeekRequest((previous) => ({
+            time,
+            revision: (previous?.revision ?? 0) + 1,
+          }))
+        }
+        onTogglePlay={() => void audioControlsRef.current?.toggle()}
+        onToggleCollapse={() => setTimelineCollapsed((value) => !value)}
+        onResizeHeight={setTimelineHeight}
+        onZoom={setTimelineZoom}
+        onSelectClip={(clip) => setTimelineSelection(clip)}
+        onSelectPage={(pageId) => void activatePage(pageId)}
+        onAddPage={() => void addEmptyPage()}
+      />
+    </div>
   );
 }
 

@@ -84,6 +84,16 @@ import {
   type ExportRequestBody,
 } from './export.js';
 import {
+  VideoExportError,
+  cancelVideoExportJob,
+  checkVideoExportAvailability,
+  createVideoExportJob,
+  getVideoExportJob,
+  listVideoExportJobs,
+  readVideoExportArtifact,
+  type VideoExportRequest,
+} from './remotion-export.js';
+import {
   PageDetectionCoordinator,
   PageDetectionError,
 } from './page-detection.js';
@@ -1065,6 +1075,141 @@ async function handleRequest(
             error instanceof Error
               ? error.message
               : 'Server-side MP4 export failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Remotion motion-comic export jobs (explicit create → poll → download).
+  // -------------------------------------------------------------------------
+
+  if (request.method === 'GET' && request.url === '/api/video/export') {
+    try {
+      const availability = await checkVideoExportAvailability();
+      sendJson(response, 200, {
+        ...availability,
+        jobs: listVideoExportJobs(),
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_PROBE_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not probe Remotion video export.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/video/export') {
+    try {
+      const value = (await readJsonBody(request, 80 * 1024 * 1024)) as Record<
+        string,
+        unknown
+      >;
+      const job = await createVideoExportJob(
+        value as unknown as VideoExportRequest,
+      );
+      sendJson(response, 202, { job });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        const status =
+          error.code === 'NOT_FOUND'
+            ? 404
+            : error.code === 'INVALID_INPUT' || error.code === 'VALIDATION_FAILED'
+              ? 400
+              : 500;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Video export job creation failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  const videoExportJobMatch = /^\/api\/video\/export\/([A-Za-z0-9-]+)$/.exec(
+    request.url ?? '',
+  );
+  if (request.method === 'GET' && videoExportJobMatch) {
+    try {
+      sendJson(response, 200, { job: getVideoExportJob(videoExportJobMatch[1]!) });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message: error instanceof Error ? error.message : 'Lookup failed.',
+        },
+      });
+    }
+    return;
+  }
+  if (request.method === 'DELETE' && videoExportJobMatch) {
+    try {
+      sendJson(response, 200, {
+        job: cancelVideoExportJob(videoExportJobMatch[1]!),
+      });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message: error instanceof Error ? error.message : 'Cancel failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  const videoExportFileMatch =
+    /^\/api\/video\/export\/([A-Za-z0-9-]+)\/file$/.exec(request.url ?? '');
+  if (request.method === 'GET' && videoExportFileMatch) {
+    try {
+      const artifact = await readVideoExportArtifact(videoExportFileMatch[1]!);
+      response.writeHead(200, {
+        'content-type': 'video/mp4',
+        'content-length': String(artifact.bytes.byteLength),
+        'content-disposition': `attachment; filename="${artifact.fileName}"`,
+        'x-content-type-options': 'nosniff',
+      });
+      response.end(artifact.bytes);
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Download failed.',
         },
       });
     }

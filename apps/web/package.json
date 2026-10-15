@@ -15,11 +15,14 @@
     "@comic-captioner/core": "workspace:*",
     "@comic-captioner/rendering": "workspace:*",
     "@comic-captioner/shared": "workspace:*",
+    "@comic-captioner/video-composer": "workspace:*",
+    "@remotion/player": "4.0.535",
     "@tailwindcss/vite": "^4.1.13",
     "@vitejs/plugin-react": "^5.0.4",
     "clipper-lib": "^6.4.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "remotion": "4.0.535",
     "tailwindcss": "^4.1.13"
   },
   "devDependencies": {

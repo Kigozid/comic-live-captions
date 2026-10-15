@@ -46,6 +46,10 @@ workflow.
 - **Server MP4 export** — deterministic frame render + FFmpeg encode
   (`POST /api/export`). Falls back to browser captureStream when FFmpeg is
   missing. Probe with `GET /api/export/ffmpeg`.
+- **Remotion motion-comic export** — job-based H.264 MP4 with in-bubble
+  captions, word-by-word / karaoke reveal, optional camera motion, and
+  narration audio (`POST /api/video/export` → poll → download). Local render
+  only. See `docs/remotion-export.md`.
 - **ONNX models** — YOLOv10n bubble proposals + wav2vec2-base-960h CTC forced
   alignment. Fetch with `pnpm models:fetch`; status at `GET /api/models`.
   Env overrides: `COMIC_YOLO_MODEL`, `COMIC_WAV2VEC_MODEL`.
@@ -64,6 +68,8 @@ workflow.
 - FFmpeg on PATH for server MP4 encode (`brew install ffmpeg` or a static build)
 - Optional ONNX models for ML bubble proposals and wav2vec2 word timing:
   `corepack pnpm models:fetch` (downloads into `models/`, gitignored)
+- Remotion motion-comic export uses Chrome Headless Shell (auto-downloaded on
+  first render into `node_modules/.remotion/`) and Remotion's bundled FFmpeg
 
 ## Development
 
