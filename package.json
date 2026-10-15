@@ -21,7 +21,9 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml}\"",
     "models:fetch": "node scripts/fetch-models.mjs",
     "models:fetch:lama": "node scripts/fetch-lama.mjs",
-    "lama:serve": "python3 scripts/lama-service.py --port 3040"
+    "lama:serve": "python3 scripts/lama-service.py --port 3040",
+    "whisper:serve": "python3 scripts/faster-whisper-service.py --port 3041",
+    "whisper:fetch": "python3 -c \"from faster_whisper import WhisperModel; import os; m=os.environ.get('COMIC_WHISPER_MODEL','small'); WhisperModel(m, device='cpu', compute_type='int8'); print('cached', m)\""
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

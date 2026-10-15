@@ -12,6 +12,15 @@ import type {
   Bounds,
 } from '@comic-captioner/shared';
 import {
+  buildTimelineFromAlignedWords,
+  timelineCuesFromDialogueEvents,
+  type TimelineCaptionAssignment,
+} from '../../../packages/caption-engine/src/timeline-mapping.js';
+import type {
+  DialogueEvent,
+  CaptionLayout,
+} from '@comic-captioner/core';
+import {
   detectTextRegionsForInpaint,
   inpaintTextRegions,
   type InpaintBubbleInput,
@@ -778,4 +787,45 @@ function bufferToBase64(bytes: Uint8Array): string {
   }
   // Node / vitest
   return Buffer.from(bytes).toString('base64');
+}
+
+export interface TimelineFromAlignedTranscriptResult {
+  readonly events: readonly DialogueEvent[];
+  readonly cues: readonly {
+    readonly id: string;
+    readonly bubbleId: string;
+    readonly start: number;
+    readonly end: number;
+    readonly confidence: number;
+  }[];
+}
+
+/**
+ * Wire acoustically aligned / transcript words onto the caption timeline.
+ *
+ * This is a pure mapping stage after ASR + optional `/api/align-words`
+ * refinement. It never re-transcribes audio. Assignments bind caption units
+ * to bubbles + layouts; unassigned units stay off the timeline for review.
+ */
+export function timelineFromAlignedTranscript(
+  transcript: {
+    readonly segments: readonly {
+      readonly id: string;
+      readonly words: readonly WordTimestamp[];
+    }[];
+  },
+  assignment:
+    | {
+        readonly bubbleId: BubbleId;
+        readonly layout: CaptionLayout;
+        readonly confidence?: number;
+      }
+    | readonly TimelineCaptionAssignment[],
+): TimelineFromAlignedTranscriptResult {
+  const words = transcript.segments.flatMap((segment) => segment.words);
+  const { events } = buildTimelineFromAlignedWords(words, assignment);
+  return {
+    events,
+    cues: timelineCuesFromDialogueEvents(events),
+  };
 }

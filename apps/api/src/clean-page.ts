@@ -34,6 +34,12 @@ export interface CleanPageRequest {
     readonly contour: {
       readonly points: readonly { readonly x: number; readonly y: number }[];
     };
+    readonly boundingBox?: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
     readonly interiorHint?:
       | 'white-balloon'
       | 'coloured-balloon'
@@ -46,6 +52,7 @@ export interface CleanPageRequest {
   readonly options?: {
     readonly expansionPx?: number;
     readonly preferLamaForArtwork?: boolean;
+    readonly mergeGapPx?: number;
     /**
      * Default `bubble-interior`. Use `approved` only to also erase text
      * regions the user explicitly accepted. Unreviewed free-floating text
@@ -151,6 +158,17 @@ export class CleanPageCoordinator {
         })),
         coordinateSpace: space,
       },
+      ...(bubble.boundingBox
+        ? {
+            boundingBox: {
+              x: bubble.boundingBox.x,
+              y: bubble.boundingBox.y,
+              width: bubble.boundingBox.width,
+              height: bubble.boundingBox.height,
+              coordinateSpace: space,
+            },
+          }
+        : {}),
       ...(bubble.interiorHint ? { interiorHint: bubble.interiorHint } : {}),
       ...(bubble.outlineMask ? { outlineMask: bubble.outlineMask } : {}),
     }));

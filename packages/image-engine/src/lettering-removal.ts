@@ -118,6 +118,11 @@ export interface LetteringBubbleInput extends InpaintBubbleInput {
   readonly outlineMask?: Uint8Array | null;
   /** Interior classification hint from detection. */
   readonly interiorHint?: LetteringRegionContext;
+  /**
+   * Detector bounding box (may be looser than `contour`). Used to keep
+   * interior flood-fill inside the drawn balloon when contours are offset.
+   */
+  readonly boundingBox?: Bounds<ImageSpace> | null;
 }
 
 export interface LetteringRemovalOptions {
@@ -339,6 +344,22 @@ export class LetteringRemover {
       ),
     );
 
+    // For bubble-associated lettering, capture ALL near-black ink strictly
+    // inside the balloon (2px inside the outline). Component-based ink
+    // detection misses glyphs that touch the outline ("UH", "BROTHER YO").
+    for (const [index, region] of activeRegions.entries()) {
+      if (!region.associatedBubbleId) continue;
+      const bubble = findBubble(input.bubbles ?? [], region.associatedBubbleId);
+      if (!bubble) continue;
+      captureInteriorInkRemnants(
+        baseMasks[index]!.mask,
+        input.image,
+        bubble,
+        width,
+        height,
+      );
+    }
+
     // Manual additions join their region's mask. Exclusions always win.
     for (const edit of input.manualEdits ?? []) {
       if (!edit.addPixels) continue;
@@ -393,11 +414,13 @@ export class LetteringRemover {
         if (unscopedAdd[i]) workingMask[i] = 1;
       }
     }
+    const userExclusions = new Uint8Array(pixelCount);
     for (const edit of input.manualEdits ?? []) {
       if (edit.excludePixels) {
         validateDenseMask(edit.excludePixels, pixelCount, 'manual excludePixels');
         for (let i = 0; i < pixelCount; i += 1) {
           if (edit.excludePixels[i]) {
+            userExclusions[i] = 1;
             workingMask[i] = 0;
             for (const regionMask of expandedMasks) regionMask[i] = 0;
           }
@@ -565,6 +588,27 @@ export class LetteringRemover {
           method,
           settings,
         );
+        // Final remnant sweep for balloon interiors: leftover glyph pixels
+        // that never joined the mask ("UH", "BROTHER YO") are painted out.
+        if (method === 'white-fill' || method === 'background-fill') {
+          const balloon = findBubble(
+            input.bubbles ?? [],
+            source.associatedBubbleId,
+          );
+          if (balloon) {
+            sweepInteriorLetteringRemnants(
+              cleaned,
+              input.image,
+              balloon,
+              regionMask,
+              protectedOutline,
+              userExclusions,
+              width,
+              height,
+              method === 'white-fill',
+            );
+          }
+        }
       }
 
       methodSummary[method] += 1;
@@ -728,6 +772,231 @@ function rasterizeSourceRegion(
     'INVALID_MASK',
     `Text region ${region.id} needs a mask, polygon, or bounding box.`,
   );
+}
+
+/**
+ * Finish a white-balloon interior.
+ *
+ * Contours are often offset from the drawn balloon, so remnant glyphs can
+ * sit outside `contour` but inside the detector bounding box. We erase
+ * near-black connected components that do not touch the bbox border (true
+ * lettering) while keeping outline/panel strokes that run along the edge.
+ */
+function sweepInteriorLetteringRemnants(
+  cleaned: Uint8ClampedArray,
+  original: RasterImage,
+  bubble: LetteringBubbleInput,
+  filledMask: Uint8Array,
+  protectedOutline: Uint8Array,
+  userExclusions: Uint8Array,
+  width: number,
+  height: number,
+  useWhite: boolean,
+): void {
+  const pixelCount = width * height;
+  const box = bubbleBox(bubble, width, height);
+  // Inset so panel borders on the box edge are preserved.
+  const inset = 3;
+  const x0 = box.x + inset;
+  const y0 = box.y + inset;
+  const x1 = box.x + box.width - inset;
+  const y1 = box.y + box.height - inset;
+  if (x1 <= x0 || y1 <= y0) return;
+
+  // Label near-black components in the box; keep those that touch the border.
+  const dark = new Uint8Array(pixelCount);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const i = y * width + x;
+      if (pixelLuma(original.data, i) <= 110) dark[i] = 1;
+    }
+  }
+  const visited = new Uint8Array(pixelCount);
+  const stack: number[] = [];
+  const erase = new Uint8Array(pixelCount);
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const start = y * width + x;
+      if (!dark[start] || visited[start]) continue;
+      const component: number[] = [];
+      let touchesBorder = false;
+      stack.length = 0;
+      stack.push(start);
+      visited[start] = 1;
+      while (stack.length > 0) {
+        const index = stack.pop()!;
+        component.push(index);
+        const cx = index % width;
+        const cy = (index / width) | 0;
+        if (cx <= x0 || cy <= y0 || cx >= x1 - 1 || cy >= y1 - 1) {
+          touchesBorder = true;
+        }
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (nx < x0 || ny < y0 || nx >= x1 || ny >= y1) continue;
+          const n = ny * width + nx;
+          if (dark[n] && !visited[n]) {
+            visited[n] = 1;
+            stack.push(n);
+          }
+        }
+      }
+      // Lettering is enclosed by the balloon; strokes run along the border.
+      if (touchesBorder) continue;
+      // Ignore huge art blobs accidentally enclosed by a loose bbox.
+      if (component.length > 25_000) continue;
+      // Tiny specks are paper noise, not lettering.
+      if (component.length < 10) continue;
+      for (const index of component) erase[index] = 1;
+    }
+  }
+
+  // Absorb anti-aliased glyph edges so remnant ghosts disappear.
+  const eraseWide = useWhite ? dilateMaskLocal(erase, width, height, 2) : erase;
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!eraseWide[i] || protectedOutline[i] || userExclusions[i]) continue;
+    cleaned[i * 4] = 255;
+    cleaned[i * 4 + 1] = 255;
+    cleaned[i * 4 + 2] = 255;
+    cleaned[i * 4 + 3] = 255;
+    filledMask[i] = 1;
+  }
+}
+
+function pixelLuma(data: Uint8ClampedArray | Uint8Array, index: number): number {
+  return (
+    0.2126 * data[index * 4]! +
+    0.7152 * data[index * 4 + 1]! +
+    0.0722 * data[index * 4 + 2]!
+  );
+}
+
+function bubbleBox(
+  bubble: LetteringBubbleInput,
+  width: number,
+  height: number,
+): { x: number; y: number; width: number; height: number } {
+  // Prefer the detector bbox when present — it tracks the drawn balloon even
+  // when `contour` is offset.
+  if (bubble.boundingBox) {
+    const b = bubble.boundingBox;
+    const x = Math.max(0, Math.floor(b.x));
+    const y = Math.max(0, Math.floor(b.y));
+    return {
+      x,
+      y,
+      width: Math.max(1, Math.min(width - x, Math.ceil(b.width))),
+      height: Math.max(1, Math.min(height - y, Math.ceil(b.height))),
+    };
+  }
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (const point of bubble.contour.points) {
+    if (point.x < minX) minX = point.x;
+    if (point.y < minY) minY = point.y;
+    if (point.x > maxX) maxX = point.x;
+    if (point.y > maxY) maxY = point.y;
+  }
+  if (maxX < 0) return { x: 0, y: 0, width, height };
+  const x = Math.max(0, Math.floor(minX));
+  const y = Math.max(0, Math.floor(minY));
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.min(width - x, Math.ceil(maxX) - x + 1)),
+    height: Math.max(1, Math.min(height - y, Math.ceil(maxY) - y + 1)),
+  };
+}
+
+/**
+ * Union `mask` with every near-black pixel strictly inside the balloon.
+ *
+ * Keeps a 2px ring so the outline stroke itself is never erased. Unlike
+ * component-filtered ink detection, glyphs that touch the outline are still
+ * captured — the usual source of remnant scraps on real pages.
+ */
+function captureInteriorInkRemnants(
+  mask: Uint8Array,
+  image: RasterImage,
+  bubble: LetteringBubbleInput,
+  width: number,
+  height: number,
+): void {
+  const pixelCount = width * height;
+  const filled = rasterizePolygon(bubble.contour, width, height);
+  const inner = erodeMaskLocal(filled, width, height, 2);
+  if (countMask(inner) === 0) return;
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!inner[i] || mask[i]) continue;
+    const r = image.data[i * 4]!;
+    const g = image.data[i * 4 + 1]!;
+    const b = image.data[i * 4 + 2]!;
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (luma <= 110) mask[i] = 1;
+  }
+}
+
+function erodeMaskLocal(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+): Uint8Array {
+  if (radius <= 0) return Uint8Array.from(mask);
+  const out = Uint8Array.from(mask);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+      if (!mask[i]) continue;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          if (!mask[ny * width + nx]) {
+            out[i] = 0;
+            break;
+          }
+        }
+        if (!out[i]) break;
+      }
+    }
+  }
+  return out;
+}
+
+function dilateMaskLocal(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+): Uint8Array {
+  if (radius <= 0) return Uint8Array.from(mask);
+  const out = Uint8Array.from(mask);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+      if (!mask[i]) continue;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          out[ny * width + nx] = 1;
+        }
+      }
+    }
+  }
+  return out;
 }
 
 /**

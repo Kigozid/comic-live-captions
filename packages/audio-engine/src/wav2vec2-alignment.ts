@@ -123,12 +123,19 @@ export async function alignWordsAcoustic(
       interval,
       input.timebase,
     );
-    const posteriors = await input.provider.encode({
-      pcm: pcmSlice,
-      sampleRateHz: input.sampleRateHz,
-      interval: segment.interval,
-      tokens,
-    });
+    let posteriors: CtcFramePosteriors;
+    try {
+      posteriors = await input.provider.encode({
+        pcm: pcmSlice,
+        sampleRateHz: input.sampleRateHz,
+        interval: segment.interval,
+        tokens,
+      });
+    } catch (cause) {
+      throw new ForcedAlignAcousticError(
+        `Acoustic encoder failed: ${cause instanceof Error ? cause.message : 'unknown error'}`,
+      );
+    }
     validatePosteriors(posteriors);
     framesPerSegment.push(posteriors.numFrames);
 

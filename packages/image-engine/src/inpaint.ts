@@ -695,7 +695,11 @@ function detectInkMask(
     if (component.area < minimumComponentArea) continue;
     if (component.area > maximumComponentArea) continue;
     const boxHeight = component.maxY - component.minY + 1;
-    if (boxHeight > interiorHeight * 0.75) continue;
+    // Reject full-height outline rings, but keep short lettering on small
+    // balloons ("UH…") whose glyphs can span most of a tiny interior.
+    if (boxHeight > interiorHeight * 0.95 && component.area > interiorHeight * 3) {
+      continue;
+    }
     accepted.add(component.label);
   }
   const mask = new Uint8Array(luminance.length);

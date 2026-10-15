@@ -56,6 +56,9 @@ import {
   type TranscriptionProvider,
 } from '@comic-captioner/audio-engine';
 import { WhisperTranscriptionProvider } from './whisper-transcription.js';
+import {
+  createFasterWhisperProviderFromEnv,
+} from './faster-whisper.js';
 import type {
   ImageSpace,
   OCRLine,
@@ -94,22 +97,27 @@ import type { LetteringSourceRegion } from '@comic-captioner/image-engine';
 const serviceName = 'comic-captioner-api';
 
 /**
- * ASR preference: whisper (local) → gemini → offline stub.
- * Override with COMIC_ASR=whisper|gemini|offline.
+ * ASR preference: faster-whisper (local Python) → whisper (transformers.js)
+ * → gemini → offline stub.
+ * Override with COMIC_ASR=faster-whisper|whisper|gemini|offline.
+ * Model: COMIC_WHISPER_MODEL (default small). Service: COMIC_WHISPER_URL.
  */
 function resolveTranscriptionProviderId(): string {
   const forced = process.env.COMIC_ASR ?? process.env.COMIC_TRANSCRIPTION_PROVIDER;
   if (forced === 'offline') return 'offline-stub';
   if (forced === 'gemini') return 'gemini';
   if (forced === 'whisper') return 'whisper';
-  if (process.env.GEMINI_API_KEY) return 'gemini';
-  return 'whisper';
+  if (forced === 'faster-whisper' || forced === 'faster_whisper')
+    return 'faster-whisper';
+  // Default local path: faster-whisper (CPU INT8 small model).
+  return 'faster-whisper';
 }
 
 function createTranscriptionProvider(): TranscriptionProvider {
   const id = resolveTranscriptionProviderId();
   if (id === 'gemini') return new GeminiTranscriptionProvider();
   if (id === 'whisper') return new WhisperTranscriptionProvider();
+  if (id === 'faster-whisper') return createFasterWhisperProviderFromEnv();
   return new OfflineTranscriptionProvider();
 }
 
@@ -176,6 +184,8 @@ interface ApiState {
     readonly differencePng: Buffer;
   } | null;
   textDifferences: TextDifferenceResult | null;
+  /** Test injection for acoustic forced alignment (skips ONNX load). */
+  readonly ctcProviderOverride?: CtcFramePosteriorsProvider;
 }
 
 class RequestError extends Error {
@@ -688,7 +698,10 @@ function mapHybridBubble(entry: HybridBubble): Record<string, unknown> {
   };
 }
 
-async function loadWav2vec2ProviderOrThrow(): Promise<CtcFramePosteriorsProvider> {
+async function loadWav2vec2ProviderOrThrow(
+  state?: ApiState,
+): Promise<CtcFramePosteriorsProvider> {
+  if (state?.ctcProviderOverride) return state.ctcProviderOverride;
   try {
     wav2vecProviderPromise ??= loadWav2vec2CtcProvider();
     return (await wav2vecProviderPromise) as CtcFramePosteriorsProvider;
@@ -726,6 +739,7 @@ async function refineTranscriptWordTimes(
   audioBytes: Uint8Array,
   asset: { readonly timebase: { readonly id: string } },
   signal?: AbortSignal,
+  state?: ApiState,
 ): Promise<{
   readonly transcript: unknown;
   readonly acousticAlignment: {
@@ -741,7 +755,7 @@ async function refineTranscriptWordTimes(
     const decoded = await decodeAudioToPcm(audioBytes, {
       sampleRateHz: 16_000,
     });
-    const provider = await loadWav2vec2ProviderOrThrow();
+    const provider = await loadWav2vec2ProviderOrThrow(state);
     const alignment = await alignWordsAcoustic({
       segments: transcript.segments.map((segment) => ({
         id: segment.id,
@@ -1109,7 +1123,7 @@ async function handleRequest(
       const { audio, asset } = await readMultipartAudio(request);
       const controller = new AbortController();
       request.once('aborted', () => controller.abort());
-      // Whisper → Gemini → offline stub. COMIC_ASR forces a path.
+      // faster-whisper / whisper → Gemini → offline stub. COMIC_ASR forces a path.
       let provider = createTranscriptionProvider();
       let transcript;
       try {
@@ -1126,11 +1140,17 @@ async function handleRequest(
         const missingModel =
           cause instanceof Error &&
           (cause.name === 'WhisperTranscriptionError' ||
-            /MODEL_MISSING|MODEL_LOAD_FAILED/i.test(cause.message));
+            cause.name === 'FasterWhisperError' ||
+            /MODEL_MISSING|MODEL_LOAD_FAILED|UNAVAILABLE/i.test(cause.message));
+        const localDefault =
+          resolveTranscriptionProviderId() === 'whisper' ||
+          resolveTranscriptionProviderId() === 'faster-whisper';
         if (
           missingModel &&
-          resolveTranscriptionProviderId() === 'whisper' &&
-          process.env.COMIC_ASR !== 'whisper'
+          localDefault &&
+          process.env.COMIC_ASR !== 'whisper' &&
+          process.env.COMIC_ASR !== 'faster-whisper' &&
+          process.env.COMIC_ASR !== 'faster_whisper'
         ) {
           provider = process.env.GEMINI_API_KEY
             ? new GeminiTranscriptionProvider()
@@ -1161,6 +1181,7 @@ async function handleRequest(
         ),
         asset,
         controller.signal,
+        state,
       );
       sendJson(response, 200, {
         transcript: refined.transcript,
@@ -1562,6 +1583,13 @@ async function handleRequest(
           'Provide segments[] with text and start/end seconds.',
         );
       }
+      if (segments.length > 2000) {
+        throw new RequestError(
+          400,
+          'INVALID_ALIGN_REQUEST',
+          'At most 2000 transcript segments are accepted per alignment.',
+        );
+      }
       if (!pcmBase64 && !audioBase64) {
         throw new RequestError(
           400,
@@ -1569,10 +1597,28 @@ async function handleRequest(
           'Provide pcm (base64 Float32LE) or audio (base64 compressed bytes).',
         );
       }
+      if (
+        !Number.isFinite(sampleRateHz) ||
+        sampleRateHz < 8_000 ||
+        sampleRateHz > 192_000
+      ) {
+        throw new RequestError(
+          400,
+          'INVALID_ALIGN_REQUEST',
+          'sampleRateHz must be between 8000 and 192000.',
+        );
+      }
 
       let pcm: Float32Array;
       if (pcmBase64) {
         const buffer = Buffer.from(pcmBase64, 'base64');
+        if (buffer.byteLength === 0) {
+          throw new RequestError(
+            400,
+            'INVALID_ALIGN_REQUEST',
+            'Decoded PCM is empty.',
+          );
+        }
         pcm = new Float32Array(
           buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
         );
@@ -1581,10 +1627,17 @@ async function handleRequest(
           new Uint8Array(Buffer.from(audioBase64!, 'base64')),
           { sampleRateHz },
         );
+        if (decoded.pcm.length === 0) {
+          throw new RequestError(
+            400,
+            'INVALID_ALIGN_REQUEST',
+            'Decoded audio is empty.',
+          );
+        }
         pcm = decoded.pcm;
       }
 
-      const provider = await loadWav2vec2ProviderOrThrow();
+      const provider = await loadWav2vec2ProviderOrThrow(state);
       const alignment = await alignWordsAcoustic({
         segments: segments.map((item, index) => {
           const segment = asRecord(item);
@@ -1597,12 +1650,26 @@ async function handleRequest(
               `Segment ${index + 1} needs finite start < end in seconds.`,
             );
           }
+          const text = typeof segment.text === 'string' ? segment.text : '';
+          const words = Array.isArray(segment.words)
+            ? (segment.words as unknown[])
+                .map((w) => String(w))
+                .filter((w) => w.trim().length > 0)
+            : undefined;
+          if (!text.trim() && (!words || words.length === 0)) {
+            throw new RequestError(
+              400,
+              'INVALID_ALIGN_REQUEST',
+              `Segment ${index + 1} needs non-empty text or words[].`,
+            );
+          }
           return {
             id:
               typeof segment.id === 'string' && segment.id
                 ? segment.id
                 : `segment-${index + 1}`,
-            text: typeof segment.text === 'string' ? segment.text : '',
+            text,
+            ...(words && words.length > 0 ? { words } : {}),
             interval: {
               start: {
                 value: start,
@@ -2410,12 +2477,21 @@ async function handleRequest(
   sendJson(response, 404, { error: 'Not found' });
 }
 
-export function createApiServer(): Server {
+export interface CreateApiServerOptions {
+  /**
+   * Inject a CTC frame-posteriors provider (tests use
+   * `SyntheticCtcPosteriorsProvider`) so unit tests need no ONNX weights.
+   */
+  readonly ctcProvider?: CtcFramePosteriorsProvider;
+}
+
+export function createApiServer(options: CreateApiServerOptions = {}): Server {
   const state: ApiState = {
     sourceImages: new Map(),
     alignment: null,
     visualizations: null,
     textDifferences: null,
+    ...(options.ctcProvider ? { ctcProviderOverride: options.ctcProvider } : {}),
   };
   return createServer((request, response) => {
     void handleRequest(request, response, state);
@@ -2564,6 +2640,7 @@ function parseCleanTextRegions(
 function parseCleanBubbles(value: unknown): {
   id: string;
   contour: { points: readonly { x: number; y: number }[] };
+  boundingBox?: { x: number; y: number; width: number; height: number };
   interiorHint?:
     | 'white-balloon'
     | 'coloured-balloon'
@@ -2596,6 +2673,19 @@ function parseCleanBubbles(value: unknown): {
       hint === 'unknown'
         ? hint
         : undefined;
+    const box = asRecord(bubble.boundingBox);
+    const boundingBox =
+      typeof box.x === 'number' &&
+      typeof box.y === 'number' &&
+      typeof box.width === 'number' &&
+      typeof box.height === 'number'
+        ? {
+            x: box.x,
+            y: box.y,
+            width: box.width,
+            height: box.height,
+          }
+        : undefined;
     return {
       id:
         typeof bubble.id === 'string' && bubble.id
@@ -2607,6 +2697,7 @@ function parseCleanBubbles(value: unknown): {
           return { x: Number(p.x), y: Number(p.y) };
         }),
       },
+      ...(boundingBox ? { boundingBox } : {}),
       ...(interiorHint ? { interiorHint } : {}),
     };
   });
