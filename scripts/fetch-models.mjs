@@ -8,6 +8,9 @@
  * exported from models/bubble-yolo/comic-speech-bubble-detector.pt via
  * `python3 scripts/export-bubble-onnx.py` (not downloaded).
  *
+ * Optional Big-LaMa (generative lettering fallback) is NOT fetched here.
+ * Use `pnpm models:fetch:lama` or set LAMA_MODEL. See docs/lettering-removal.md.
+ *
  * Models are gitignored. Re-run after a clean checkout.
  */
 import { mkdir, writeFile, access } from 'node:fs/promises';

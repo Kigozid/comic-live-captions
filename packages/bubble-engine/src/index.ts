@@ -125,6 +125,19 @@ export type {
   YoloInferenceSession,
 } from './ml-bubble-detector.js';
 export {
+  associateTextRegionsToBubbles,
+  matchOcrBoxToTextRegion,
+  TextBubbleAssociationError,
+} from './text-region-association.js';
+export type {
+  BubbleForAssociation,
+  TextAssociationClassification,
+  TextBubbleAssociation,
+  TextBubbleAssociationOptions,
+  TextBubbleAssociationResult,
+  TextRegionForAssociation,
+} from './text-region-association.js';
+export {
   CaptionSafeRegionEngine,
   CaptionSafeRegionError,
 } from './safe-region.js';

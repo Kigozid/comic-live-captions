@@ -62,6 +62,8 @@ describe('API health endpoint', () => {
       service: 'comic-captioner-api',
       configuration: {
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
+        transcriptionProvider: expect.any(String),
+        ocrEngine: expect.any(String),
       },
     });
   });

@@ -86,6 +86,13 @@ export function EditingWorkspace({
       readonly kind: 'speech' | 'thought' | 'narration' | 'unknown';
       readonly confidence: number;
       readonly classificationConfidence?: number;
+      readonly geometryProvenance?: 'model' | 'derived' | 'hybrid';
+      readonly boundingBox?: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
       readonly detectionSources?: readonly (
         | 'detected'
         | 'ml'
@@ -97,6 +104,27 @@ export function EditingWorkspace({
       readonly tail?:
         readonly { readonly x: number; readonly y: number }[] | null;
     }[];
+    readonly textRegions?: readonly {
+      readonly id: string;
+      readonly boundingBox: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly confidence: number;
+      readonly associatedBubbleId?: string | null;
+      readonly associationConfidence?: number;
+      readonly associationClassification?: 'dialogue' | 'non-dialogue' | 'ambiguous';
+      readonly needsReview?: boolean;
+      readonly kindHint?: string;
+    }[];
+    readonly confidences?: {
+      readonly bubbleDetection: number;
+      readonly textRegionDetection: number;
+      readonly ocrRecognition: number | null;
+      readonly bubbleAssociation: number | null;
+    };
     readonly ocr: {
       readonly blocks: readonly {
         readonly lines: readonly {
@@ -1180,6 +1208,46 @@ export function EditingWorkspace({
                 </g>
               ))}
               {showDetection &&
+                analysis?.textRegions?.map((region) => {
+                  const uncertain =
+                    region.needsReview ||
+                    region.associationClassification === 'ambiguous' ||
+                    !region.associatedBubbleId;
+                  return (
+                    <g key={`text-region:${region.id}`} pointerEvents="none">
+                      <rect
+                        x={region.boundingBox.x}
+                        y={region.boundingBox.y}
+                        width={region.boundingBox.width}
+                        height={region.boundingBox.height}
+                        fill={
+                          uncertain
+                            ? 'rgba(239,68,68,.08)'
+                            : 'rgba(14,165,233,.1)'
+                        }
+                        stroke={uncertain ? '#dc2626' : '#0284c7'}
+                        strokeWidth={Math.max(space.dimensions.width / 800, 1.5)}
+                        strokeDasharray={uncertain ? '4 3' : undefined}
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <title>
+                        {`Text region ${region.id} · det ${Math.round(region.confidence * 100)}% · assoc ${Math.round((region.associationConfidence ?? 0) * 100)}% · ${region.associationClassification ?? 'non-dialogue'}${region.associatedBubbleId ? ` → ${region.associatedBubbleId}` : ''}`}
+                      </title>
+                      <text
+                        x={region.boundingBox.x}
+                        y={region.boundingBox.y + region.boundingBox.height + 12}
+                        fill={uncertain ? '#b91c1c' : '#075985'}
+                        fontSize={Math.max(space.dimensions.width / 140, 9)}
+                        stroke="white"
+                        strokeWidth={Math.max(space.dimensions.width / 700, 1)}
+                        paintOrder="stroke"
+                      >
+                        {`det ${Math.round(region.confidence * 100)}% · assoc ${Math.round((region.associationConfidence ?? 0) * 100)}%`}
+                      </text>
+                    </g>
+                  );
+                })}
+              {showDetection &&
                 analysis?.ocr.blocks
                   .flatMap((block) => block.lines)
                   .map((line, index) => (
@@ -1323,6 +1391,93 @@ export function EditingWorkspace({
           className="comic-inspector overflow-y-auto border-t border-stone-300 bg-white p-4 lg:border-l lg:border-t-0"
         >
           <h2 className="mb-3 font-semibold">Inspector</h2>
+          {analysis?.confidences && (
+            <section
+              aria-label="Detection confidences"
+              className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3"
+            >
+              <h3 className="text-sm font-semibold text-sky-950">
+                Detection confidences
+              </h3>
+              <p className="mt-1 text-[11px] text-sky-900">
+                Bubble, text-region, OCR, and association scores stay separate.
+              </p>
+              <dl className="mt-2 space-y-1 text-xs text-sky-950">
+                <div className="flex justify-between gap-2">
+                  <dt>Bubble detection</dt>
+                  <dd>
+                    {Math.round(analysis.confidences.bubbleDetection * 100)}%
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt>Text regions</dt>
+                  <dd>
+                    {Math.round(analysis.confidences.textRegionDetection * 100)}%
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt>OCR recognition</dt>
+                  <dd>
+                    {analysis.confidences.ocrRecognition === null
+                      ? '—'
+                      : `${Math.round(analysis.confidences.ocrRecognition * 100)}%`}
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt>Bubble association</dt>
+                  <dd>
+                    {analysis.confidences.bubbleAssociation === null
+                      ? '—'
+                      : `${Math.round(analysis.confidences.bubbleAssociation * 100)}%`}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          )}
+          {analysis?.textRegions &&
+            analysis.textRegions.some(
+              (region) =>
+                region.needsReview ||
+                region.associationClassification === 'ambiguous' ||
+                !region.associatedBubbleId,
+            ) && (
+              <section
+                aria-label="Uncertain text regions"
+                className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3"
+              >
+                <h3 className="text-sm font-semibold text-rose-950">
+                  Uncertain text regions
+                </h3>
+                <p className="mt-1 text-[11px] text-rose-900">
+                  Low-confidence or unassociated regions stay available for
+                  manual review.
+                </p>
+                <ul className="mt-2 max-h-36 space-y-1 overflow-y-auto">
+                  {analysis.textRegions
+                    .filter(
+                      (region) =>
+                        region.needsReview ||
+                        region.associationClassification === 'ambiguous' ||
+                        !region.associatedBubbleId,
+                    )
+                    .map((region) => (
+                      <li
+                        key={region.id}
+                        className="rounded border border-rose-200 bg-white px-2 py-1 text-xs"
+                      >
+                        <span className="block truncate font-medium">
+                          {region.id}
+                        </span>
+                        <span className="text-[10px] text-rose-800">
+                          det {Math.round(region.confidence * 100)}% · assoc{' '}
+                          {Math.round((region.associationConfidence ?? 0) * 100)}
+                          % · {region.associationClassification ?? 'non-dialogue'}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              </section>
+            )}
           {looseOCR.length > 0 && (
             <section
               aria-label="Unassociated OCR review"

@@ -49,6 +49,10 @@ workflow.
 - **ONNX models** — YOLOv10n bubble proposals + wav2vec2-base-960h CTC forced
   alignment. Fetch with `pnpm models:fetch`; status at `GET /api/models`.
   Env overrides: `COMIC_YOLO_MODEL`, `COMIC_WAV2VEC_MODEL`.
+- **Lettering removal** — `POST /api/clean-page` erases original lettering
+  with region-aware methods (white-fill / background-fill / local-reconstruct,
+  optional LaMa for artwork). See `docs/lettering-removal.md`. The original
+  page is never overwritten; editor supports mask review and reprocess.
 - **Acoustic word timing** — `POST /api/transcribe` refines Gemini word times
   with wav2vec2 CTC Viterbi forced alignment; `POST /api/align-words` exposes
   the same path for the editor (`refineWordTimesAcoustic`).

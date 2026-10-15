@@ -19,7 +19,9 @@
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,html,yml,yaml}\"",
-    "models:fetch": "node scripts/fetch-models.mjs"
+    "models:fetch": "node scripts/fetch-models.mjs",
+    "models:fetch:lama": "node scripts/fetch-lama.mjs",
+    "lama:serve": "python3 scripts/lama-service.py --port 3040"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

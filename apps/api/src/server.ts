@@ -55,6 +55,7 @@ import {
   type CtcFramePosteriorsProvider,
   type TranscriptionProvider,
 } from '@comic-captioner/audio-engine';
+import { WhisperTranscriptionProvider } from './whisper-transcription.js';
 import type {
   ImageSpace,
   OCRLine,
@@ -79,23 +80,44 @@ import {
   runExportJob,
   type ExportRequestBody,
 } from './export.js';
+import {
+  PageDetectionCoordinator,
+  PageDetectionError,
+} from './page-detection.js';
+import {
+  CleanPageCoordinator,
+  CleanPageError,
+} from './clean-page.js';
+import { createLamaProviderFromEnv } from './lama-provider.js';
+import type { LetteringSourceRegion } from '@comic-captioner/image-engine';
 
 const serviceName = 'comic-captioner-api';
 
-/** Gemini when configured; offline stub otherwise (or when forced). */
+/**
+ * ASR preference: whisper (local) → gemini → offline stub.
+ * Override with COMIC_ASR=whisper|gemini|offline.
+ */
 function resolveTranscriptionProviderId(): string {
-  const forced = process.env.COMIC_TRANSCRIPTION_PROVIDER;
+  const forced = process.env.COMIC_ASR ?? process.env.COMIC_TRANSCRIPTION_PROVIDER;
   if (forced === 'offline') return 'offline-stub';
-  if (forced === 'gemini' || process.env.GEMINI_API_KEY) {
-    return process.env.GEMINI_API_KEY ? 'gemini' : 'offline-stub';
-  }
-  return 'offline-stub';
+  if (forced === 'gemini') return 'gemini';
+  if (forced === 'whisper') return 'whisper';
+  if (process.env.GEMINI_API_KEY) return 'gemini';
+  return 'whisper';
 }
 
 function createTranscriptionProvider(): TranscriptionProvider {
   const id = resolveTranscriptionProviderId();
   if (id === 'gemini') return new GeminiTranscriptionProvider();
+  if (id === 'whisper') return new WhisperTranscriptionProvider();
   return new OfflineTranscriptionProvider();
+}
+
+/** OCR engine: trocr (stronger) → paddle. Override with COMIC_OCR_ENGINE. */
+function resolveOcrEngineId(): string {
+  const forced = process.env.COMIC_OCR_ENGINE;
+  if (forced === 'paddle' || forced === 'trocr') return forced;
+  return 'trocr';
 }
 
 const alignmentEngine = new ImageAlignmentEngine();
@@ -104,6 +126,37 @@ const bubbleDetectionEngine = new BubbleDetectionEngine();
 const bubbleAssociationEngine = new BubbleDialogueAssociationEngine();
 const safeRegionEngine = new CaptionSafeRegionEngine();
 const captionFittingEngine = new CaptionFittingEngine();
+/** Comic-aware page detection: bubbles + text regions + OCR association. */
+const pageDetectionCoordinator = new PageDetectionCoordinator({
+  recognizeOcr: async (image, space) => {
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(image).metadata();
+    const sha256 = createHash('sha256').update(image).digest('hex');
+    const result = await scanWithLocalOCR(image, {
+      id: `detect-page-${sha256.slice(0, 12)}`,
+      role: 'original',
+      filename: 'detect-page',
+      format: meta.format === 'jpeg' ? 'JPEG' : meta.format === 'webp' ? 'WEBP' : 'PNG',
+      mediaType:
+        meta.format === 'jpeg'
+          ? 'image/jpeg'
+          : meta.format === 'webp'
+            ? 'image/webp'
+            : 'image/png',
+      dimensions: {
+        width: space.dimensions.width,
+        height: space.dimensions.height,
+      },
+      sizeBytes: image.byteLength,
+      sha256,
+    });
+    return result.document;
+  },
+});
+/** Lettering removal / clean-page generation (server-side, sequential). */
+const cleanPageCoordinator = new CleanPageCoordinator({
+  generative: createLamaProviderFromEnv(),
+});
 /** Lazily cached ONNX sessions (YOLO proposals + wav2vec2 CTC). */
 let yoloSessionPromise: Promise<unknown> | null = null;
 let wav2vecProviderPromise: Promise<unknown> | null = null;
@@ -585,9 +638,18 @@ function mapDetectedBubble(bubble: {
   readonly kind: string;
   readonly polygon: { readonly points: readonly unknown[] };
   readonly contour?: { readonly points: readonly unknown[] };
+  readonly boundingBox?: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly coordinateSpace?: unknown;
+  };
   readonly confidence: number;
   readonly classificationConfidence?: number;
   readonly shape: string;
+  readonly coordinateSpace?: { readonly id?: string };
+  readonly algorithmVersion?: string;
   readonly tail?: { readonly points: readonly unknown[] } | null;
 }): Record<string, unknown> {
   return {
@@ -596,8 +658,13 @@ function mapDetectedBubble(bubble: {
     shape: bubble.shape,
     polygon: bubble.polygon,
     contour: bubble.contour ?? bubble.polygon,
+    boundingBox: bubble.boundingBox ?? null,
     confidence: bubble.confidence,
     classificationConfidence: bubble.classificationConfidence,
+    // Deterministic geometry owns final contours; model output is proposals.
+    geometryProvenance: 'derived',
+    algorithmVersion: bubble.algorithmVersion ?? 'bubble-cv-2',
+    coordinateSpaceId: bubble.coordinateSpace?.id ?? null,
     tail: bubble.tail?.points ?? null,
   };
 }
@@ -605,8 +672,10 @@ function mapDetectedBubble(bubble: {
 /** Hybrid bubble → API shape, including ML/heuristic provenance. */
 function mapHybridBubble(entry: HybridBubble): Record<string, unknown> {
   const { bubble, sources, support, quality } = entry;
+  const hasModel = support.some((item) => item.provenance === 'ml');
   return {
     ...mapDetectedBubble(bubble),
+    geometryProvenance: hasModel ? 'hybrid' : 'derived',
     sources,
     quality,
     support: support.map((item) => ({
@@ -892,6 +961,7 @@ async function handleRequest(
       configuration: {
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
         transcriptionProvider: resolveTranscriptionProviderId(),
+        ocrEngine: resolveOcrEngineId(),
       },
     });
     return;
@@ -1039,18 +1109,45 @@ async function handleRequest(
       const { audio, asset } = await readMultipartAudio(request);
       const controller = new AbortController();
       request.once('aborted', () => controller.abort());
-      // Gemini when configured; offline stub otherwise so demos can still run
-      // map → fit → export. Set COMIC_TRANSCRIPTION_PROVIDER=offline to force.
-      const provider = createTranscriptionProvider();
-      const transcript = await new TranscriptionService(provider).transcribe({
-        asset,
-        bytes: new Uint8Array(
-          audio.bytes.buffer,
-          audio.bytes.byteOffset,
-          audio.bytes.byteLength,
-        ),
-        signal: controller.signal,
-      });
+      // Whisper → Gemini → offline stub. COMIC_ASR forces a path.
+      let provider = createTranscriptionProvider();
+      let transcript;
+      try {
+        transcript = await new TranscriptionService(provider).transcribe({
+          asset,
+          bytes: new Uint8Array(
+            audio.bytes.buffer,
+            audio.bytes.byteOffset,
+            audio.bytes.byteLength,
+          ),
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        const missingModel =
+          cause instanceof Error &&
+          (cause.name === 'WhisperTranscriptionError' ||
+            /MODEL_MISSING|MODEL_LOAD_FAILED/i.test(cause.message));
+        if (
+          missingModel &&
+          resolveTranscriptionProviderId() === 'whisper' &&
+          process.env.COMIC_ASR !== 'whisper'
+        ) {
+          provider = process.env.GEMINI_API_KEY
+            ? new GeminiTranscriptionProvider()
+            : new OfflineTranscriptionProvider();
+          transcript = await new TranscriptionService(provider).transcribe({
+            asset,
+            bytes: new Uint8Array(
+              audio.bytes.buffer,
+              audio.bytes.byteOffset,
+              audio.bytes.byteLength,
+            ),
+            signal: controller.signal,
+          });
+        } else {
+          throw cause;
+        }
+      }
 
       // WhisperX-style refinement: wav2vec2 CTC forced alignment of transcript
       // words to acoustic frames. Falls back to provider timings when weights or
@@ -1240,6 +1337,205 @@ async function handleRequest(
             error instanceof Error
               ? error.message
               : 'Bubble detection failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/detect-page') {
+    try {
+      const value = asRecord(await readJsonBody(request, 50 * 1024 * 1024));
+      const imageBase64 =
+        typeof value.pageImage === 'string' ? value.pageImage : null;
+      if (!imageBase64) {
+        throw new RequestError(
+          400,
+          'INVALID_DETECT_REQUEST',
+          'Provide pageImage as base64-encoded PNG/JPEG bytes.',
+        );
+      }
+      const normalized = imageBase64.includes(',')
+        ? imageBase64.slice(imageBase64.indexOf(',') + 1)
+        : imageBase64;
+      const imageBytes = new Uint8Array(Buffer.from(normalized, 'base64'));
+      const width = Number(value.width ?? 0);
+      const height = Number(value.height ?? 0);
+      const includeOcr = value.includeOcr !== false;
+      const result = await pageDetectionCoordinator.detect({
+        pageImage: imageBytes,
+        ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+        ...(Number.isFinite(height) && height > 0 ? { height } : {}),
+        ...(typeof value.spaceId === 'string' && value.spaceId
+          ? { spaceId: value.spaceId }
+          : {}),
+        ...(typeof value.requestId === 'string' && value.requestId
+          ? { requestId: value.requestId }
+          : {}),
+        includeOcr,
+        ...(typeof value.confidenceThreshold === 'number'
+          ? { confidenceThreshold: value.confidenceThreshold }
+          : {}),
+        ...(typeof value.maximumProposals === 'number'
+          ? { maximumProposals: value.maximumProposals }
+          : {}),
+        requireYolo: value.requireYolo === true,
+      });
+      if (request.aborted || response.destroyed) return;
+      sendJson(response, result.status === 'stale' ? 409 : 200, {
+        ...result,
+        // JSON-safe: freeze() objects serialize as plain values.
+        bubbles: result.bubbles.map((bubble) => ({
+          ...bubble,
+          // Ensure geometry payloads are plain JSON.
+          polygon: bubble.polygon,
+          contour: bubble.contour,
+          boundingBox: bubble.boundingBox,
+        })),
+        textRegions: result.textRegions,
+      });
+    } catch (error) {
+      if (request.aborted || response.destroyed) return;
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof PageDetectionError) {
+        const status =
+          error.code === 'INVALID_REQUEST'
+            ? 400
+            : error.code === 'IMAGE_TOO_LARGE'
+              ? 413
+              : error.code === 'MODEL_MISSING'
+                ? 503
+                : 422;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'PAGE_DETECTION_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Page detection failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/clean-page') {
+    try {
+      const value = asRecord(await readJsonBody(request, 50 * 1024 * 1024));
+      const imageBase64 =
+        typeof value.pageImage === 'string' ? value.pageImage : null;
+      if (!imageBase64) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'Provide pageImage as base64-encoded PNG/JPEG or raw RGBA bytes.',
+        );
+      }
+      const normalized = imageBase64.includes(',')
+        ? imageBase64.slice(imageBase64.indexOf(',') + 1)
+        : imageBase64;
+      const encoded = new Uint8Array(Buffer.from(normalized, 'base64'));
+      const width = Number(value.width ?? 0);
+      const height = Number(value.height ?? 0);
+      const raster = await decodeCleanRaster(encoded, width, height);
+      const textRegions = parseCleanTextRegions(value.textRegions, raster, spaceIdFrom(value));
+      const bubbles = parseCleanBubbles(value.bubbles);
+      const manualEdits = parseManualEdits(value.manualEdits, raster.width, raster.height);
+      const result = await cleanPageCoordinator.cleanPage({
+        image: raster,
+        ...(typeof value.spaceId === 'string' && value.spaceId
+          ? { spaceId: value.spaceId }
+          : {}),
+        ...(typeof value.requestId === 'string' && value.requestId
+          ? { requestId: value.requestId }
+          : {}),
+        textRegions,
+        bubbles,
+        manualEdits,
+        ...(value.options && typeof value.options === 'object'
+          ? {
+              options: {
+                ...((value.options as Record<string, unknown>).expansionPx !==
+                undefined
+                  ? {
+                      expansionPx: Number(
+                        (value.options as Record<string, unknown>).expansionPx,
+                      ),
+                    }
+                  : {}),
+                preferLamaForArtwork:
+                  (value.options as Record<string, unknown>)
+                    .preferLamaForArtwork !== false,
+                erasureScope:
+                  (value.options as Record<string, unknown>).erasureScope ===
+                  'approved'
+                    ? ('approved' as const)
+                    : ('bubble-interior' as const),
+              },
+            }
+          : {}),
+      });
+      if (request.aborted || response.destroyed) return;
+      if (result.status === 'stale') {
+        sendJson(response, 409, {
+          error: {
+            code: 'STALE_CLEAN_REQUEST',
+            message:
+              'A newer cleaning request superseded this one; discard these results.',
+          },
+          ...result,
+        });
+        return;
+      }
+      // Return PNG as base64 plus a JSON-safe summary.
+      sendJson(response, 200, {
+        requestId: result.requestId,
+        status: result.status,
+        width: result.width,
+        height: result.height,
+        cleanedPng: Buffer.from(result.cleanedPng).toString('base64'),
+        removalMask: Buffer.from(result.removalMask).toString('base64'),
+        regions: result.regions,
+        warnings: result.warnings,
+        methodSummary: result.methodSummary,
+        complete: result.complete,
+        lamaAvailable: result.lamaAvailable,
+      });
+    } catch (error) {
+      if (request.aborted || response.destroyed) return;
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof CleanPageError) {
+        const status =
+          error.code === 'INVALID_REQUEST'
+            ? 400
+            : error.code === 'IMAGE_TOO_LARGE'
+              ? 413
+              : 422;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'CLEAN_PAGE_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Page cleaning failed.',
         },
       });
     }
@@ -2123,6 +2419,248 @@ export function createApiServer(): Server {
   };
   return createServer((request, response) => {
     void handleRequest(request, response, state);
+  });
+}
+
+function spaceIdFrom(value: Record<string, unknown>): string | undefined {
+  return typeof value.spaceId === 'string' && value.spaceId
+    ? value.spaceId
+    : undefined;
+}
+
+async function decodeCleanRaster(
+  encoded: Uint8Array,
+  width: number,
+  height: number,
+): Promise<{ width: number; height: number; data: Uint8ClampedArray }> {
+  const sharp = (await import('sharp')).default;
+  // Raw RGBA when width/height are supplied and length matches.
+  if (
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0 &&
+    encoded.byteLength === width * height * 4
+  ) {
+    return {
+      width,
+      height,
+      data: new Uint8ClampedArray(
+        encoded.buffer,
+        encoded.byteOffset,
+        encoded.byteLength,
+      ),
+    };
+  }
+  try {
+    const { data, info } = await sharp(encoded)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return {
+      width: info.width,
+      height: info.height,
+      data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength),
+    };
+  } catch {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'pageImage could not be decoded as PNG/JPEG/RGBA.',
+    );
+  }
+}
+
+function parseCleanTextRegions(
+  value: unknown,
+  raster: { width: number; height: number },
+  spaceId: string | undefined,
+): LetteringSourceRegion[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'textRegions must be an array.',
+    );
+  }
+  const space = createImageSpace(
+    spaceId ?? `image:clean-${raster.width}x${raster.height}`,
+    raster.width,
+    raster.height,
+  );
+  return value.map((item, index) => {
+    const region = asRecord(item);
+    const id =
+      typeof region.id === 'string' && region.id
+        ? region.id
+        : `region-${index + 1}`;
+    const source: {
+      id: string;
+      boundingBox?: LetteringSourceRegion['boundingBox'];
+      polygon?: LetteringSourceRegion['polygon'];
+      mask?: Uint8Array;
+      associatedBubbleId?: string | null;
+      detectionConfidence?: number;
+      reviewStatus?: LetteringSourceRegion['reviewStatus'];
+      approved?: boolean;
+    } = { id };
+    if (Array.isArray(region.boundingBox)) {
+      const [x, y, w, h] = region.boundingBox as number[];
+      source.boundingBox = {
+        x: Number(x),
+        y: Number(y),
+        width: Number(w),
+        height: Number(h),
+        coordinateSpace: space,
+      };
+    } else if (region.boundingBox && typeof region.boundingBox === 'object') {
+      const box = asRecord(region.boundingBox);
+      source.boundingBox = {
+        x: Number(box.x),
+        y: Number(box.y),
+        width: Number(box.width),
+        height: Number(box.height),
+        coordinateSpace: space,
+      };
+    }
+    if (Array.isArray(region.polygon) && region.polygon.length >= 3) {
+      source.polygon = {
+        coordinateSpace: space,
+        points: (region.polygon as unknown[]).map((point) => {
+          const p = asRecord(point);
+          return {
+            x: Number(p.x),
+            y: Number(p.y),
+            coordinateSpace: space,
+          };
+        }),
+      };
+    }
+    if (typeof region.mask === 'string') {
+      source.mask = new Uint8Array(Buffer.from(region.mask, 'base64'));
+    }
+    if (typeof region.associatedBubbleId === 'string') {
+      source.associatedBubbleId = region.associatedBubbleId;
+    } else if (region.associatedBubbleId === null) {
+      source.associatedBubbleId = null;
+    }
+    if (typeof region.detectionConfidence === 'number') {
+      source.detectionConfidence = region.detectionConfidence;
+    }
+    if (
+      region.reviewStatus === 'pending' ||
+      region.reviewStatus === 'accepted' ||
+      region.reviewStatus === 'rejected' ||
+      region.reviewStatus === 'edited'
+    ) {
+      source.reviewStatus = region.reviewStatus;
+    }
+    if (region.approved === true) source.approved = true;
+    return source as LetteringSourceRegion;
+  });
+}
+
+function parseCleanBubbles(value: unknown): {
+  id: string;
+  contour: { points: readonly { x: number; y: number }[] };
+  interiorHint?:
+    | 'white-balloon'
+    | 'coloured-balloon'
+    | 'textured-balloon'
+    | 'artwork'
+    | 'unknown';
+}[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'bubbles must be an array.',
+    );
+  }
+  return value.map((item, index) => {
+    const bubble = asRecord(item);
+    const contour = asRecord(bubble.contour);
+    const points = Array.isArray(contour.points)
+      ? contour.points
+      : Array.isArray(bubble.polygon)
+        ? bubble.polygon
+        : [];
+    const hint = bubble.interiorHint;
+    const interiorHint =
+      hint === 'white-balloon' ||
+      hint === 'coloured-balloon' ||
+      hint === 'textured-balloon' ||
+      hint === 'artwork' ||
+      hint === 'unknown'
+        ? hint
+        : undefined;
+    return {
+      id:
+        typeof bubble.id === 'string' && bubble.id
+          ? bubble.id
+          : `bubble-${index + 1}`,
+      contour: {
+        points: (points as unknown[]).map((point) => {
+          const p = asRecord(point);
+          return { x: Number(p.x), y: Number(p.y) };
+        }),
+      },
+      ...(interiorHint ? { interiorHint } : {}),
+    };
+  });
+}
+
+function parseManualEdits(
+  value: unknown,
+  width: number,
+  height: number,
+): {
+  regionId?: string;
+  addPixels?: Uint8Array;
+  excludePixels?: Uint8Array;
+}[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'manualEdits must be an array.',
+    );
+  }
+  const pixelCount = width * height;
+  return value.map((item) => {
+    const edit = asRecord(item);
+    const out: {
+      regionId?: string;
+      addPixels?: Uint8Array;
+      excludePixels?: Uint8Array;
+    } = {};
+    if (typeof edit.regionId === 'string') out.regionId = edit.regionId;
+    if (typeof edit.addPixels === 'string') {
+      const pixels = new Uint8Array(Buffer.from(edit.addPixels, 'base64'));
+      if (pixels.length !== pixelCount) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'manual addPixels must match page dimensions.',
+        );
+      }
+      out.addPixels = pixels;
+    }
+    if (typeof edit.excludePixels === 'string') {
+      const pixels = new Uint8Array(Buffer.from(edit.excludePixels, 'base64'));
+      if (pixels.length !== pixelCount) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'manual excludePixels must match page dimensions.',
+        );
+      }
+      out.excludePixels = pixels;
+    }
+    return out;
   });
 }
 

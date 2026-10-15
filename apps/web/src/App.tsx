@@ -33,6 +33,12 @@ import type { DialogueMapping } from '@comic-captioner/core';
 import { proposeTranscriptBubbleMappings } from './dialogue-review.js';
 import { recognizeComicBubbles, recognizeComicPage } from './paddle-ocr.js';
 import type { PaddleOCRStatus } from './paddle-ocr.js';
+import { LetteringCleanupReview } from './LetteringCleanupReview.js';
+import {
+  cleanPageViaApi,
+  removalMaskToOverlayPng,
+  type CleanPageApiResult,
+} from './clean-page-client.js';
 import type {
   ExportBubble,
   ExportCaption,
@@ -521,6 +527,7 @@ export function App() {
       readonly kind: 'speech' | 'thought' | 'narration' | 'unknown';
       readonly confidence: number;
       readonly classificationConfidence?: number;
+      readonly geometryProvenance?: 'model' | 'derived' | 'hybrid';
       readonly detectionSources?: readonly (
         | 'detected'
         | 'ml'
@@ -532,6 +539,27 @@ export function App() {
       readonly tail?:
         readonly { readonly x: number; readonly y: number }[] | null;
     }[];
+    readonly textRegions?: readonly {
+      readonly id: string;
+      readonly boundingBox: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly confidence: number;
+      readonly associatedBubbleId?: string | null;
+      readonly associationConfidence?: number;
+      readonly associationClassification?: 'dialogue' | 'non-dialogue' | 'ambiguous';
+      readonly needsReview?: boolean;
+      readonly kindHint?: string;
+    }[];
+    readonly confidences?: {
+      readonly bubbleDetection: number;
+      readonly textRegionDetection: number;
+      readonly ocrRecognition: number | null;
+      readonly bubbleAssociation: number | null;
+    };
     readonly ocr: {
       readonly blocks: readonly {
         readonly lines: readonly {
@@ -550,6 +578,24 @@ export function App() {
   } | null>(null);
   const [pageAnalysisBusy, setPageAnalysisBusy] = useState(false);
   const [autoCleanBusy, setAutoCleanBusy] = useState(false);
+  const [letteringResult, setLetteringResult] =
+    useState<CleanPageApiResult | null>(null);
+  const [letteringMaskUrl, setLetteringMaskUrl] = useState<string | null>(null);
+  const [showRemovalMask, setShowRemovalMask] = useState(false);
+  const [letteringAccepted, setLetteringAccepted] = useState(false);
+  const [letteringManualAdds, setLetteringManualAdds] = useState<Uint8Array[]>(
+    [],
+  );
+  const [letteringManualExcludes, setLetteringManualExcludes] = useState<
+    Uint8Array[]
+  >([]);
+  const [letteringMaskEdit, setLetteringMaskEdit] = useState<
+    'idle' | 'add' | 'exclude'
+  >('idle');
+  const [letteringApprovedIds, setLetteringApprovedIds] = useState<string[]>(
+    [],
+  );
+  const letteringRequestRef = useRef(0);
   const [readingDirection, setReadingDirection] = useState<'ltr' | 'rtl'>('ltr');
   const [bubbleProposalSource, setBubbleProposalSource] = useState<
     'heuristic' | 'ml'
@@ -824,6 +870,17 @@ export function App() {
       setProjectMessage(
         `Auto-clean erased ${result.erasedPixelCount.toLocaleString()} text pixels across ${result.masks.length} bubble region(s). Review the cleaned page, or import a hand-prepared cleaned page to override.`,
       );
+      // Production lettering-removal pass via the API for method records,
+      // warnings, and manual-mask editing. Original bytes stay intact.
+      void runLetteringRemoval({
+        imageBytes: new Uint8Array(
+          raster.data.buffer,
+          raster.data.byteOffset,
+          raster.data.byteLength,
+        ),
+        width: raster.width,
+        height: raster.height,
+      });
       return true;
     } catch (cause) {
       setError(
@@ -834,6 +891,106 @@ export function App() {
       return false;
     } finally {
       setAutoCleanBusy(false);
+    }
+  }
+
+  /** Call `/api/clean-page` and store comparison + method records. */
+  async function runLetteringRemoval(input: {
+    imageBytes: Uint8Array;
+    width: number;
+    height: number;
+    regionIds?: readonly string[];
+    approvedRegionIds?: readonly string[];
+    erasureScope?: 'bubble-interior' | 'approved';
+  }) {
+    const requestId = `lettering-${++letteringRequestRef.current}`;
+    try {
+      const pixelCount = input.width * input.height;
+      const manualEdits: {
+        regionId?: string;
+        addPixels?: Uint8Array;
+        excludePixels?: Uint8Array;
+      }[] = [];
+      if (letteringManualAdds.length > 0) {
+        const add = new Uint8Array(pixelCount);
+        for (const layer of letteringManualAdds) {
+          if (layer.length !== pixelCount) continue;
+          for (let i = 0; i < pixelCount; i += 1) if (layer[i]) add[i] = 1;
+        }
+        manualEdits.push({ addPixels: add });
+      }
+      if (letteringManualExcludes.length > 0) {
+        const exclude = new Uint8Array(pixelCount);
+        for (const layer of letteringManualExcludes) {
+          if (layer.length !== pixelCount) continue;
+          for (let i = 0; i < pixelCount; i += 1) if (layer[i]) exclude[i] = 1;
+        }
+        manualEdits.push({ excludePixels: exclude });
+      }
+      const approvedSet = new Set(input.approvedRegionIds ?? []);
+      const textRegions = (pageAnalysis?.textRegions ?? [])
+        .filter(
+          (region) =>
+            !input.regionIds || input.regionIds.includes(region.id),
+        )
+        .map((region) => {
+          const approved = approvedSet.has(region.id);
+          return {
+            id: region.id,
+            boundingBox: [
+              region.boundingBox.x,
+              region.boundingBox.y,
+              region.boundingBox.width,
+              region.boundingBox.height,
+            ] as [number, number, number, number],
+            ...(region.confidence !== undefined
+              ? { detectionConfidence: region.confidence }
+              : {}),
+            ...(region.associatedBubbleId !== undefined
+              ? { associatedBubbleId: region.associatedBubbleId }
+              : {}),
+            ...(approved
+              ? { approved: true, reviewStatus: 'accepted' as const }
+              : {}),
+          };
+        });
+      const bubbles = (pageAnalysis?.bubbles ?? []).map((bubble) => ({
+        id: bubble.id,
+        contour: bubble.polygon.points.map((point) => ({
+          x: point.x,
+          y: point.y,
+        })),
+        interiorHint: 'white-balloon' as const,
+      }));
+      const result = await cleanPageViaApi({
+        imageBytes: input.imageBytes,
+        width: input.width,
+        height: input.height,
+        requestId,
+        textRegions,
+        bubbles,
+        manualEdits,
+        // Default safety: only bubble-interior lettering auto-erases.
+        erasureScope: input.erasureScope ?? 'bubble-interior',
+      });
+      if (result.status === 'stale' || letteringRequestRef.current !== Number(requestId.split('-').pop())) {
+        return;
+      }
+      setLetteringResult(result);
+      setLetteringAccepted(false);
+      if (result.removalMask.length === input.width * input.height) {
+        const blob = removalMaskToOverlayPng(
+          result.removalMask,
+          input.width,
+          input.height,
+        );
+        setLetteringMaskUrl((previous) => {
+          if (previous) URL.revokeObjectURL(previous);
+          return URL.createObjectURL(blob);
+        });
+      }
+    } catch {
+      // Lettering API is an enhancement; local auto-clean result remains.
     }
   }
 
@@ -1145,6 +1302,8 @@ export function App() {
 
     setPageAnalysis((previous) => ({
       bubbles,
+      ...(previous?.textRegions ? { textRegions: previous.textRegions } : {}),
+      ...(previous?.confidences ? { confidences: previous.confidences } : {}),
       ocr: previous?.ocr ?? result.ocr,
     }));
     setProjectMessage(
@@ -1152,7 +1311,80 @@ export function App() {
         ? `Bubble scan found ${bubbles.length} candidates (reading order: ${order.length} panels/bubbles, ${readingDirection.toUpperCase()}). Review regions on the comic canvas.`
         : `Bubble scan found ${bubbles.length} candidates. Review and select regions on the comic canvas.`,
     );
+    // Independent text-region detection + association (best-effort).
+    void refreshPageTextRegions();
     return { ...result, bubbles };
+  }
+
+  /** Call `/api/detect-page` and merge text regions + separate confidences. */
+  async function refreshPageTextRegions() {
+    try {
+      const role = sourceBlobs.original && pair.original ? 'original' : 'cleaned';
+      const image = sourceBlobs[role];
+      const metadata = pair[role];
+      if (!image || !metadata) return;
+      const bytes = new Uint8Array(await image.arrayBuffer());
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const response = await fetch('/api/detect-page', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pageImage: btoa(binary),
+          width: metadata.dimensions.width,
+          height: metadata.dimensions.height,
+          includeOcr: false,
+          requestId: `web-${metadata.id}-${Date.now()}`,
+        }),
+      });
+      const result = (await response.json()) as {
+        readonly status?: string;
+        readonly textRegions?: readonly {
+          readonly id: string;
+          readonly boundingBox: {
+            readonly x: number;
+            readonly y: number;
+            readonly width: number;
+            readonly height: number;
+          };
+          readonly confidence: number;
+          readonly associatedBubbleId?: string | null;
+          readonly associationConfidence?: number;
+          readonly associationClassification?: 'dialogue' | 'non-dialogue' | 'ambiguous';
+          readonly needsReview?: boolean;
+          readonly kindHint?: string;
+        }[];
+        readonly confidences?: {
+          readonly bubbleDetection: number;
+          readonly textRegionDetection: number;
+          readonly ocrRecognition: number | null;
+          readonly bubbleAssociation: number | null;
+        };
+        readonly error?: { readonly message?: string };
+      };
+      if (!response.ok || result.status === 'stale') {
+        if (result.error?.message) {
+          setProjectMessage(result.error.message);
+        }
+        return;
+      }
+      setPageAnalysis((previous) =>
+        previous
+          ? {
+              ...previous,
+              textRegions: result.textRegions ?? [],
+              ...(result.confidences
+                ? { confidences: result.confidences }
+                : {}),
+            }
+          : previous,
+      );
+    } catch {
+      // Text-region analysis is an enhancement; never block bubble editing.
+    }
   }
 
   async function extractPageText(
@@ -1265,7 +1497,12 @@ export function App() {
         })),
       })),
     };
-    setPageAnalysis((previous) => ({ bubbles: previous?.bubbles ?? [], ocr }));
+    setPageAnalysis((previous) => ({
+      bubbles: previous?.bubbles ?? [],
+      ...(previous?.textRegions ? { textRegions: previous.textRegions } : {}),
+      ...(previous?.confidences ? { confidences: previous.confidences } : {}),
+      ocr,
+    }));
     setOcrDocument(recognized.document);
     setOcrMetrics(recognized.metrics);
     // Confidence triage: only uncertain words/lines need review.
@@ -1398,7 +1635,11 @@ export function App() {
       };
       if (!response.ok || !result.bubbles || !result.ocr || !result.matches)
         throw new Error(result.error?.message ?? 'Speech automation failed.');
-      setPageAnalysis({ bubbles: result.bubbles, ocr: result.ocr });
+      setPageAnalysis({
+        bubbles: result.bubbles,
+        ocr: result.ocr,
+      });
+      void refreshPageTextRegions();
       setSpeechProposals(result.matches);
       setSpeechAutomationWarning(result.ocrWarning ?? null);
       setDismissedMappingIds([]);
@@ -2900,6 +3141,123 @@ export function App() {
             onDetect={() => void detectRemovedText()}
             regions={textRegions}
             running={textDetectionBusy}
+          />
+        )}
+        {pair.original && (
+          <LetteringCleanupReview
+            originalUrl={sourceUrls.original ?? null}
+            cleanedUrl={sourceUrls.cleaned ?? null}
+            maskUrl={letteringMaskUrl}
+            result={letteringResult}
+            busy={autoCleanBusy || pageAnalysisBusy}
+            accepted={letteringAccepted}
+            showMask={showRemovalMask}
+            maskEditMode={letteringMaskEdit}
+            pageWidth={pair.original.dimensions.width}
+            pageHeight={pair.original.dimensions.height}
+            onToggleMask={() => setShowRemovalMask((value) => !value)}
+            onSetMaskEditMode={(mode) => setLetteringMaskEdit(mode)}
+            onPaintMask={(mode, x, y, radius) => {
+              const width = pair.original!.dimensions.width;
+              const height = pair.original!.dimensions.height;
+              const layer = new Uint8Array(width * height);
+              const r = Math.max(1, radius);
+              for (let dy = -r; dy <= r; dy += 1) {
+                for (let dx = -r; dx <= r; dx += 1) {
+                  if (dx * dx + dy * dy > r * r) continue;
+                  const px = x + dx;
+                  const py = y + dy;
+                  if (px < 0 || py < 0 || px >= width || py >= height) continue;
+                  layer[py * width + px] = 1;
+                }
+              }
+              if (mode === 'add') {
+                setLetteringManualAdds((previous) => [...previous, layer]);
+              } else {
+                setLetteringManualExcludes((previous) => [...previous, layer]);
+              }
+            }}
+            onApplyMaskEdits={() => {
+              const role =
+                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
+              const blob = sourceBlobs[role];
+              const meta = pair[role];
+              if (!blob || !meta) return;
+              void blob.arrayBuffer().then((buffer) => {
+                void runLetteringRemoval({
+                  imageBytes: new Uint8Array(buffer),
+                  width: meta.dimensions.width,
+                  height: meta.dimensions.height,
+                  erasureScope: letteringApprovedIds.length
+                    ? 'approved'
+                    : 'bubble-interior',
+                  approvedRegionIds: letteringApprovedIds,
+                });
+              });
+              setLetteringMaskEdit('idle');
+            }}
+            onReprocessRegion={(regionId) => {
+              const role =
+                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
+              const blob = sourceBlobs[role];
+              const meta = pair[role];
+              if (!blob || !meta) return;
+              void blob.arrayBuffer().then((buffer) => {
+                void runLetteringRemoval({
+                  imageBytes: new Uint8Array(buffer),
+                  width: meta.dimensions.width,
+                  height: meta.dimensions.height,
+                  regionIds: [regionId],
+                  erasureScope: letteringApprovedIds.includes(regionId)
+                    ? 'approved'
+                    : 'bubble-interior',
+                  approvedRegionIds: letteringApprovedIds,
+                });
+              });
+            }}
+            onApproveRegions={(regionIds) => {
+              const next = [
+                ...new Set([...letteringApprovedIds, ...regionIds]),
+              ];
+              setLetteringApprovedIds(next);
+              const role =
+                sourceBlobs.original && pair.original ? 'original' : 'cleaned';
+              const blob = sourceBlobs[role];
+              const meta = pair[role];
+              if (!blob || !meta) return;
+              void blob.arrayBuffer().then((buffer) => {
+                void runLetteringRemoval({
+                  imageBytes: new Uint8Array(buffer),
+                  width: meta.dimensions.width,
+                  height: meta.dimensions.height,
+                  erasureScope: 'approved',
+                  approvedRegionIds: next,
+                });
+              });
+            }}
+            onAccept={() => {
+              setLetteringAccepted(true);
+              setProjectMessage(
+                'Clean page accepted. The original page remains unchanged in project assets.',
+              );
+            }}
+            onReject={() => {
+              setLetteringAccepted(false);
+              setLetteringResult(null);
+              setLetteringApprovedIds([]);
+              setProjectMessage(
+                'Clean page rejected. Review masks and reprocess.',
+              );
+            }}
+            onResetEdits={() => {
+              setLetteringManualAdds([]);
+              setLetteringManualExcludes([]);
+              setLetteringApprovedIds([]);
+              setLetteringMaskEdit('idle');
+              setProjectMessage(
+                'Manual mask edits and approvals cleared. Automatic detections are unchanged.',
+              );
+            }}
           />
         )}
         <p className="mt-6 text-center text-xs text-stone-500">
