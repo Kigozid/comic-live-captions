@@ -168,6 +168,12 @@ export type EditorAction =
       >;
       readonly coalesce?: CoalesceHint;
     }
+  | {
+      readonly type: 'split-dialogue';
+      readonly dialogueId: string;
+      readonly atSeconds: number;
+      readonly newDialogueId: string;
+    }
   | { readonly type: 'undo' }
   | { readonly type: 'redo' };
 
@@ -920,6 +926,32 @@ export function editorReducer(
         ...document.dialogues,
         [action.dialogueId]: Object.freeze({ ...current, ...patch }),
       }),
+    });
+  } else if (action.type === 'split-dialogue') {
+    const current = document.dialogues[action.dialogueId];
+    if (!current) return state;
+    const at = action.atSeconds;
+    if (!Number.isFinite(at) || at <= current.start + 0.01 || at >= current.end - 0.01) {
+      return state;
+    }
+    const first = Object.freeze({ ...current, end: at });
+    const second = Object.freeze({
+      ...current,
+      id: action.newDialogueId,
+      start: at,
+    });
+    const order = [...document.order];
+    const index = order.indexOf(action.dialogueId);
+    if (index >= 0) order.splice(index + 1, 0, action.newDialogueId);
+    else order.push(action.newDialogueId);
+    next = Object.freeze({
+      ...document,
+      dialogues: Object.freeze({
+        ...document.dialogues,
+        [action.dialogueId]: first,
+        [action.newDialogueId]: second,
+      }),
+      order: Object.freeze(order),
     });
   }
   if (next === document) return state;

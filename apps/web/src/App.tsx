@@ -508,6 +508,7 @@ export function App() {
   });
   const audioControlsRef = useRef<AudioPlaybackControls | null>(null);
   const [playbackLoop, setPlaybackLoop] = useState(false);
+  const [canvasBackdrop, setCanvasBackdrop] = useState(true);
   const [seekRequest, setSeekRequest] = useState<{
     readonly time: number;
     readonly revision: number;
@@ -2992,6 +2993,7 @@ export function App() {
       data-theme={editorTheme}
       data-inspector={inspectorOpen ? 'on' : 'off'}
       data-timeline={timelineCollapsed ? 'collapsed' : 'expanded'}
+      data-canvas-backdrop={canvasBackdrop ? 'on' : 'off'}
     >
       {/* Headless audio engine: drives playback, import, and transcription. */}
       <AudioWorkspace
@@ -4211,13 +4213,145 @@ export function App() {
                 </ToolDrawerRow>
               </ToolDrawerSection>
             )}
-            {activeTool === 'media' || activeTool === 'video' ? (
-              <ToolDrawerSection title="Workspace">
-                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
-                  Use Pages and Import tools to build the multi-page sequence. Canvas shows the active page.
-                </p>
+            {activeTool === 'media' && (
+              <ToolDrawerSection title="Media">
+                <ToolDrawerRow stacked>
+                  <ImageUploadControl
+                    busy={busyRole === 'original'}
+                    label="Original page"
+                    onSelect={(file) => void importImage('original', file)}
+                  />
+                  <ImageUploadControl
+                    busy={busyRole === 'cleaned'}
+                    label="Cleaned page"
+                    onSelect={(file) => void importImage('cleaned', file)}
+                  />
+                </ToolDrawerRow>
+                <ToolDrawerRow stacked>
+                  {sourceUrls.original ? (
+                    <figure style={{ margin: 0 }}>
+                      <img
+                        alt="Original page thumbnail"
+                        src={sourceUrls.original}
+                        style={{
+                          width: '100%',
+                          borderRadius: 6,
+                          border: '1px solid var(--ui-border)',
+                        }}
+                      />
+                      <figcaption
+                        style={{ fontSize: 11, color: 'var(--ui-muted)' }}
+                      >
+                        Original · {pair.original?.dimensions.width ?? 0}×
+                        {pair.original?.dimensions.height ?? 0}
+                      </figcaption>
+                    </figure>
+                  ) : null}
+                  {sourceUrls.cleaned ? (
+                    <figure style={{ margin: 0 }}>
+                      <img
+                        alt="Cleaned page thumbnail"
+                        src={sourceUrls.cleaned}
+                        style={{
+                          width: '100%',
+                          borderRadius: 6,
+                          border: '1px solid var(--ui-border)',
+                        }}
+                      />
+                      <figcaption
+                        style={{ fontSize: 11, color: 'var(--ui-muted)' }}
+                      >
+                        Cleaned · {pair.cleaned?.dimensions.width ?? 0}×
+                        {pair.cleaned?.dimensions.height ?? 0}
+                      </figcaption>
+                    </figure>
+                  ) : null}
+                  {!sourceUrls.original && !sourceUrls.cleaned ? (
+                    <p
+                      style={{
+                        fontSize: 11,
+                        color: 'var(--ui-muted)',
+                        margin: 0,
+                      }}
+                    >
+                      No page media yet. Import an original or cleaned comic
+                      page.
+                    </p>
+                  ) : null}
+                </ToolDrawerRow>
               </ToolDrawerSection>
-            ) : null}
+            )}
+            {activeTool === 'video' && (
+              <ToolDrawerSection title="Composition">
+                <ToolDrawerRow>
+                  <span className="inspector-label">
+                    {pagesForTimeline.length} page
+                    {pagesForTimeline.length === 1 ? '' : 's'} ·{' '}
+                    {multiPagePlan.sourcePages.length} source clip
+                    {multiPagePlan.sourcePages.length === 1 ? '' : 's'}
+                  </span>
+                </ToolDrawerRow>
+                <ToolDrawerRow stacked>
+                  {multiPagePlan.sourcePages.map((source, index) => (
+                    <button
+                      key={source.id}
+                      type="button"
+                      className={`page-chip ${timelineSelection?.kind === 'page' && timelineSelection.id === source.id ? 'selected' : ''}`}
+                      onClick={() => {
+                        setTimelineSelection({ kind: 'page', id: source.id });
+                        void activatePage(source.id);
+                        setSeekRequest((previous) => ({
+                          time: source.startSeconds,
+                          revision: (previous?.revision ?? 0) + 1,
+                        }));
+                      }}
+                    >
+                      {index + 1}. {source.startSeconds.toFixed(1)}–
+                      {source.endSeconds.toFixed(1)}s
+                    </button>
+                  ))}
+                  {multiPagePlan.sourcePages.length === 0 ? (
+                    <p
+                      style={{
+                        fontSize: 11,
+                        color: 'var(--ui-muted)',
+                        margin: 0,
+                      }}
+                    >
+                      No pages in the composition yet. Import pages first.
+                    </p>
+                  ) : null}
+                </ToolDrawerRow>
+                {multiPagePlan.warnings.length > 0 ? (
+                  <ToolDrawerRow stacked>
+                    {multiPagePlan.warnings.map((warning) => (
+                      <p
+                        key={warning}
+                        style={{
+                          fontSize: 11,
+                          color: 'var(--ui-danger)',
+                          margin: 0,
+                        }}
+                      >
+                        {warning}
+                      </p>
+                    ))}
+                  </ToolDrawerRow>
+                ) : null}
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    onClick={() => {
+                      setActiveTool('export');
+                      setInspectorOpen(true);
+                    }}
+                  >
+                    Open export tools
+                  </button>
+                </ToolDrawerRow>
+              </ToolDrawerSection>
+            )}
           </ToolDrawer>
 
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
@@ -4349,6 +4483,19 @@ export function App() {
             timelineSelection.id === dialogue.id,
         }))}
         selectedClipId={timelineSelection?.id ?? null}
+        loop={playbackLoop}
+        showBackground={canvasBackdrop}
+        onToggleLoop={() => setPlaybackLoop((value) => !value)}
+        onToggleBackground={() =>
+          setCanvasBackdrop((value) => {
+            setProjectMessage(
+              value
+                ? 'Canvas background hidden.'
+                : 'Canvas background restored.',
+            );
+            return !value;
+          })
+        }
         onSeek={(time) =>
           setSeekRequest((previous) => ({
             time,
@@ -4362,6 +4509,41 @@ export function App() {
         onSelectClip={(clip) => setTimelineSelection(clip)}
         onSelectPage={(pageId) => void activatePage(pageId)}
         onAddPage={() => void addEmptyPage()}
+        onSplitClip={() => {
+          const selected =
+            timelineSelection?.kind === 'caption'
+              ? reviewDialogues.find(
+                  (dialogue) => dialogue.id === timelineSelection.id,
+                )
+              : reviewDialogues.find(
+                  (dialogue) =>
+                    audioClock.positionSeconds > dialogue.start + 0.05 &&
+                    audioClock.positionSeconds < dialogue.end - 0.05,
+                );
+          if (!selected) {
+            setProjectMessage(
+              'Select a caption clip or place the playhead inside one to split it.',
+            );
+            return;
+          }
+          const at = audioClock.positionSeconds;
+          if (at <= selected.start + 0.05 || at >= selected.end - 0.05) {
+            setProjectMessage('Playhead must be inside the caption to split.');
+            return;
+          }
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-split-dialogue', {
+              detail: {
+                id: selected.id,
+                at,
+                newId: `dialogue:split:${selected.id}:${Date.now()}`,
+              },
+            }),
+          );
+          setProjectMessage(
+            `Split “${selected.caption.slice(0, 24) || 'caption'}” at ${at.toFixed(2)}s.`,
+          );
+        }}
       />
     </div>
   );

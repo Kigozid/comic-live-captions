@@ -501,6 +501,11 @@ body {
   background-size: 14px 14px;
 }
 
+[data-canvas-backdrop='off'] .comic-preview-panel > div.relative {
+  background-color: var(--ui-bg);
+  background-image: none;
+}
+
 .workspace-review-tools {
   display: flex;
   flex-direction: column;

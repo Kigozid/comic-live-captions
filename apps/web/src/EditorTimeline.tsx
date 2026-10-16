@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import {
   IconCollapse,
   IconExpand,
@@ -50,9 +50,13 @@ export interface EditorTimelineProps {
   readonly audioClips: readonly TimelineAudioClip[];
   readonly captions: readonly TimelineCaptionClip[];
   readonly selectedClipId?: string | null;
+  readonly loop?: boolean;
+  readonly showBackground?: boolean;
   readonly onSeek: (time: number) => void;
   readonly onTogglePlay: () => void;
   readonly onToggleCollapse: () => void;
+  readonly onToggleLoop?: () => void;
+  readonly onToggleBackground?: () => void;
   readonly onResizeHeight: (height: number) => void;
   readonly onZoom: (zoom: number) => void;
   readonly onSelectClip: (clip: {
@@ -82,9 +86,13 @@ export function EditorTimeline({
   audioClips,
   captions,
   selectedClipId,
+  loop = false,
+  showBackground = true,
   onSeek,
   onTogglePlay,
   onToggleCollapse,
+  onToggleLoop,
+  onToggleBackground,
   onResizeHeight,
   onZoom,
   onSelectClip,
@@ -94,7 +102,6 @@ export function EditorTimeline({
 }: EditorTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
-  const [loop, setLoop] = useState(false);
 
   const pxPerSecond = zoom;
   const contentWidth = Math.max(600, durationSeconds * pxPerSecond + 80);
@@ -166,7 +173,14 @@ export function EditorTimeline({
         />
       )}
       <div className="timeline-header">
-        <button className="ui-btn icon" type="button" title="Background" aria-label="Background">
+        <button
+          className={`ui-btn icon ${showBackground ? 'active' : ''}`}
+          type="button"
+          title="Toggle canvas background"
+          aria-label="Toggle canvas background"
+          aria-pressed={showBackground}
+          onClick={() => onToggleBackground?.()}
+        >
           <IconEye />
         </button>
         <button
@@ -193,7 +207,8 @@ export function EditorTimeline({
           type="button"
           aria-label="Loop"
           aria-pressed={loop}
-          onClick={() => setLoop((value) => !value)}
+          disabled={!onToggleLoop}
+          onClick={() => onToggleLoop?.()}
         >
           <IconLoop />
         </button>
