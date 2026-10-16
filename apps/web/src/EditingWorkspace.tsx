@@ -249,15 +249,33 @@ export function EditingWorkspace({
         },
       });
     };
+    const onSplitDialogue = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          id: string;
+          at: number;
+          newId: string;
+        }>
+      ).detail;
+      if (!detail?.id || !detail.newId) return;
+      dispatch({
+        type: 'split-dialogue',
+        dialogueId: detail.id,
+        atSeconds: detail.at,
+        newDialogueId: detail.newId,
+      });
+    };
     window.addEventListener('comic-editor-caption-text', onCaptionText);
     window.addEventListener('comic-editor-caption-font', onCaptionFont);
     window.addEventListener('comic-editor-caption-time', onCaptionTime);
     window.addEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
+    window.addEventListener('comic-editor-split-dialogue', onSplitDialogue);
     return () => {
       window.removeEventListener('comic-editor-caption-text', onCaptionText);
       window.removeEventListener('comic-editor-caption-font', onCaptionFont);
       window.removeEventListener('comic-editor-caption-time', onCaptionTime);
       window.removeEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
+      window.removeEventListener('comic-editor-split-dialogue', onSplitDialogue);
     };
   }, [dispatch]);
   const [proposal, setProposal] = useState<AssistProposal | null>(null);

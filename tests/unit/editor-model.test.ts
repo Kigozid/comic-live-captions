@@ -502,4 +502,58 @@ describe('editing workspace document', () => {
         ?.text,
     ).toBe('Hi!');
   });
+
+  it('splits a dialogue at the playhead into two timing clips', () => {
+    const space = createImageSpace('image:split-test', 200, 100);
+    let state = editorReducer(emptyEditorHistory, {
+      type: 'initialize',
+      imageSpace: space,
+    });
+    state = editorReducer(state, {
+      type: 'import-analysis',
+      bubbles: [
+        {
+          id: 'split-b',
+          kind: 'speech',
+          confidence: 0.9,
+          points: [
+            { x: 10, y: 10 },
+            { x: 90, y: 10 },
+            { x: 90, y: 70 },
+            { x: 10, y: 70 },
+          ],
+        },
+      ],
+    });
+    const source = state.present?.dialogues['dialogue:split-b'];
+    expect(source).toBeTruthy();
+    // Default clip is 0–1s; stretch it so a mid-clip split is valid.
+    state = editorReducer(state, {
+      type: 'edit-dialogue',
+      dialogueId: 'dialogue:split-b',
+      patch: { start: 0, end: 3 },
+    });
+    const split = editorReducer(state, {
+      type: 'split-dialogue',
+      dialogueId: 'dialogue:split-b',
+      atSeconds: 1.5,
+      newDialogueId: 'dialogue:split-b:tail',
+    });
+    const first = split.present?.dialogues['dialogue:split-b'];
+    const second = split.present?.dialogues['dialogue:split-b:tail'];
+    expect(first?.start).toBeCloseTo(0);
+    expect(first?.end).toBeCloseTo(1.5);
+    expect(second?.start).toBeCloseTo(1.5);
+    expect(second?.end).toBeCloseTo(3);
+    expect(second?.caption).toBe(source!.caption);
+    expect(split.present?.order).toContain('dialogue:split-b:tail');
+    // Out-of-range split is a no-op.
+    const rejected = editorReducer(split, {
+      type: 'split-dialogue',
+      dialogueId: 'dialogue:split-b',
+      atSeconds: first!.start,
+      newDialogueId: 'dialogue:nope',
+    });
+    expect(rejected.present?.dialogues['dialogue:nope']).toBeUndefined();
+  });
 });
