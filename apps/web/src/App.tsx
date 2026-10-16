@@ -3484,14 +3484,49 @@ export function App() {
                 </ToolDrawerRow>
                 <ToolDrawerRow stacked>
                   {pagesForTimeline.map((page, index) => (
-                    <button
+                    <div
                       key={page.id}
-                      type="button"
-                      className={`page-chip ${page.id === activePageId ? 'selected' : ''}`}
-                      onClick={() => void activatePage(page.id)}
+                      style={{ display: 'flex', gap: 4, alignItems: 'center' }}
                     >
-                      {index + 1}. {page.label}
-                    </button>
+                      <button
+                        type="button"
+                        className={`page-chip ${page.id === activePageId ? 'selected' : ''}`}
+                        style={{ flex: 1 }}
+                        onClick={() => void activatePage(page.id)}
+                      >
+                        {index + 1}. {page.label}
+                      </button>
+                      <button
+                        className="ui-btn icon"
+                        type="button"
+                        aria-label={`Move ${page.label} earlier`}
+                        disabled={index === 0}
+                        onClick={() => {
+                          void flushActivePage().then(() => {
+                            setProjectPages((pages) =>
+                              movePage(pages, page.id, -1),
+                            );
+                          });
+                        }}
+                      >
+                        ←
+                      </button>
+                      <button
+                        className="ui-btn icon"
+                        type="button"
+                        aria-label={`Move ${page.label} later`}
+                        disabled={index === pagesForTimeline.length - 1}
+                        onClick={() => {
+                          void flushActivePage().then(() => {
+                            setProjectPages((pages) =>
+                              movePage(pages, page.id, 1),
+                            );
+                          });
+                        }}
+                      >
+                        →
+                      </button>
+                    </div>
                   ))}
                   {pagesForTimeline.length === 0 ? (
                     <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
@@ -3531,6 +3566,17 @@ export function App() {
                     {alignmentBusy ? 'Aligning…' : 'Align pages'}
                   </button>
                 </ToolDrawerRow>
+                {alignment && alignmentImages && original && (
+                  <ToolDrawerRow stacked>
+                    <AlignmentReview
+                      alignment={alignment}
+                      image={{ ...original, src: alignmentImages[alignmentMode] }}
+                      mode={alignmentMode}
+                      onModeChange={setAlignmentMode}
+                      onSave={saveManualAlignment}
+                    />
+                  </ToolDrawerRow>
+                )}
                 {pair.original && (
                   <ToolDrawerRow stacked>
                     <LetteringCleanupReview
@@ -3664,8 +3710,36 @@ export function App() {
                     </select>
                   </label>
                 </ToolDrawerRow>
+                <ToolDrawerRow>
+                  <label className="inspector-label">
+                    Bubble proposals
+                    <select
+                      className="ui-select"
+                      value={bubbleProposalSource}
+                      onChange={(event) =>
+                        setBubbleProposalSource(
+                          event.target.value === 'ml' ? 'ml' : 'heuristic',
+                        )
+                      }
+                    >
+                      <option value="heuristic">Heuristic</option>
+                      <option value="ml">ML (YOLO)</option>
+                    </select>
+                  </label>
+                </ToolDrawerRow>
                 {ocrStatus ? (
                   <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>{ocrStatus.message}</p>
+                ) : null}
+                {ocrMetrics ? (
+                  <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
+                    {ocrMetrics.detectedTextRegions} regions ·{' '}
+                    {Math.round(ocrMetrics.averageConfidence * 100)}% mean confidence
+                  </p>
+                ) : null}
+                {speechAutomationWarning ? (
+                  <p style={{ fontSize: 11, color: 'var(--ui-danger)' }}>
+                    {speechAutomationWarning}
+                  </p>
                 ) : null}
                 {ocrReviewItems.length > 0 ? (
                   <p style={{ fontSize: 11, color: 'var(--ui-accent)' }}>
@@ -3704,6 +3778,27 @@ export function App() {
                     Suggest dialogue matches
                   </button>
                 </ToolDrawerRow>
+                {activeReviewText ? (
+                  <ToolDrawerRow stacked>
+                    <p style={{ fontSize: 12, margin: 0 }}>{activeReviewText}</p>
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      {activeReviewLayout
+                        ? `Fitted · ${activeReviewLayout.fontSizePx}px · ${activeReviewLayout.lines.length} lines`
+                        : 'Layout needed'}
+                    </p>
+                    {activeTranscriptMapping ? (
+                      <button
+                        className="ui-btn"
+                        type="button"
+                        onClick={() =>
+                          approveLiveMapping(activeTranscriptMapping)
+                        }
+                      >
+                        Approve mapping
+                      </button>
+                    ) : null}
+                  </ToolDrawerRow>
+                ) : null}
                 <ToolDrawerRow stacked>
                   {reviewDialogues.length === 0 ? (
                     <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
@@ -3847,7 +3942,8 @@ export function App() {
                 </ToolDrawerRow>
                 <ToolDrawerRow>
                   <span className="inspector-label">
-                    {String(audioSource?.metadata.filename ?? 'No audio loaded')}
+                    {String(audioSource?.metadata.filename ?? loadedAudioFile?.name ?? 'No audio loaded')}
+                    {audioSessionRevision > 0 ? ` · rev ${audioSessionRevision}` : ''}
                   </span>
                 </ToolDrawerRow>
                 {audioSource ? (
@@ -3919,6 +4015,63 @@ export function App() {
             )}
             {activeTool === 'export' && (
               <ToolDrawerSection title="Export">
+                <ToolDrawerRow>
+                  <select
+                    aria-label="MP4 export resolution"
+                    className="ui-select"
+                    disabled={mp4Exporting}
+                    value={mp4Resolution}
+                    onChange={(event) =>
+                      setMp4Resolution(event.currentTarget.value as Mp4Resolution)
+                    }
+                  >
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {mp4Resolution === 'custom' ? (
+                    <>
+                      <input
+                        aria-label="Custom video width"
+                        className="inspector-field"
+                        type="number"
+                        min="16"
+                        max="7680"
+                        step="2"
+                        value={customVideoWidth}
+                        onChange={(event) =>
+                          setCustomVideoWidth(event.currentTarget.value)
+                        }
+                      />
+                      <span>×</span>
+                      <input
+                        aria-label="Custom video height"
+                        className="inspector-field"
+                        type="number"
+                        min="16"
+                        max="7680"
+                        step="2"
+                        value={customVideoHeight}
+                        onChange={(event) =>
+                          setCustomVideoHeight(event.currentTarget.value)
+                        }
+                      />
+                    </>
+                  ) : null}
+                </ToolDrawerRow>
+                {mp4Progress ? (
+                  <ToolDrawerRow>
+                    <progress
+                      aria-label="MP4 export progress"
+                      className="w-28"
+                      max="100"
+                      value={mp4Progress.percent}
+                    />
+                    <span style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
+                      {Math.floor(mp4Progress.percent)}%
+                    </span>
+                  </ToolDrawerRow>
+                ) : null}
                 <ToolDrawerRow stacked>
                   <button
                     className="ui-btn"
@@ -4009,6 +4162,19 @@ export function App() {
                   </select>
                   <button
                     className="ui-btn"
+                    onClick={() => {
+                      const name = window.prompt(
+                        'Save project as',
+                        `${activeProject?.name ?? 'Comic'} copy`,
+                      );
+                      if (name) void saveProjectAs(name);
+                    }}
+                    type="button"
+                  >
+                    Save as…
+                  </button>
+                  <button
+                    className="ui-btn"
                     disabled={!activeProject?.revision}
                     onClick={() => void duplicateProject()}
                     type="button"
@@ -4022,6 +4188,16 @@ export function App() {
                   >
                     Import archive
                   </button>
+                  <input
+                    ref={projectImportRef}
+                    className="ui-sr"
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={(event) => {
+                      void importProjectFile(event.currentTarget.files?.[0]);
+                      event.currentTarget.value = '';
+                    }}
+                  />
                 </ToolDrawerRow>
                 <ToolDrawerRow>
                   <button
@@ -4189,44 +4365,6 @@ export function App() {
         onAddPage={() => void addEmptyPage()}
       />
     </div>
-  );
-}
-
-function ToolSidebar() {
-  const [active, setActive] = useState('Media');
-  const tools = [
-    { label: 'Media', target: 'comic-assets', glyph: '▧' },
-    { label: 'Comics', target: 'comic-preview', glyph: '▣' },
-    { label: 'Captions', target: 'comic-timeline', glyph: 'T' },
-    { label: 'Audio', target: 'audio-panel', glyph: '♫' },
-    { label: 'Text', target: 'text-tools', glyph: '≡' },
-    { label: 'Export', target: 'export-actions', glyph: '⇧' },
-  ];
-  return (
-    <nav className="tool-sidebar" aria-label="Editor sections">
-      <div className="tool-sidebar-label">Workspace</div>
-      {tools.map((tool) => (
-        <button
-          key={tool.label}
-          type="button"
-          className={`tool-nav-item ${active === tool.label ? 'is-active' : ''}`}
-          aria-current={active === tool.label ? 'page' : undefined}
-          title={`Show ${tool.label}`}
-          onClick={() => {
-            setActive(tool.label);
-            document.getElementById(tool.target)?.scrollIntoView({
-              behavior: 'smooth',
-              block: 'center',
-            });
-          }}
-        >
-          <span className="tool-nav-glyph" aria-hidden="true">
-            {tool.glyph}
-          </span>
-          <span>{tool.label}</span>
-        </button>
-      ))}
-    </nav>
   );
 }
 
