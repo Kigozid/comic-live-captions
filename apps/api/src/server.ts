@@ -50,9 +50,15 @@ import {
 } from './audio-pcm.js';
 import {
   ForcedAlignAcousticError,
+  OfflineTranscriptionProvider,
   alignWordsAcoustic,
   type CtcFramePosteriorsProvider,
+  type TranscriptionProvider,
 } from '@comic-captioner/audio-engine';
+import { WhisperTranscriptionProvider } from './whisper-transcription.js';
+import {
+  createFasterWhisperProviderFromEnv,
+} from './faster-whisper.js';
 import type {
   ImageSpace,
   OCRLine,
@@ -77,14 +83,98 @@ import {
   runExportJob,
   type ExportRequestBody,
 } from './export.js';
+import {
+  VideoExportError,
+  cancelVideoExportJob,
+  checkVideoExportAvailability,
+  createVideoExportJob,
+  getVideoExportJob,
+  listVideoExportJobs,
+  readVideoExportArtifact,
+  type VideoExportRequest,
+} from './remotion-export.js';
+import {
+  PageDetectionCoordinator,
+  PageDetectionError,
+} from './page-detection.js';
+import {
+  CleanPageCoordinator,
+  CleanPageError,
+} from './clean-page.js';
+import { createLamaProviderFromEnv } from './lama-provider.js';
+import type { LetteringSourceRegion } from '@comic-captioner/image-engine';
 
 const serviceName = 'comic-captioner-api';
+
+/**
+ * ASR preference: faster-whisper (local Python) → whisper (transformers.js)
+ * → gemini → offline stub.
+ * Override with COMIC_ASR=faster-whisper|whisper|gemini|offline.
+ * Model: COMIC_WHISPER_MODEL (default small). Service: COMIC_WHISPER_URL.
+ */
+function resolveTranscriptionProviderId(): string {
+  const forced = process.env.COMIC_ASR ?? process.env.COMIC_TRANSCRIPTION_PROVIDER;
+  if (forced === 'offline') return 'offline-stub';
+  if (forced === 'gemini') return 'gemini';
+  if (forced === 'whisper') return 'whisper';
+  if (forced === 'faster-whisper' || forced === 'faster_whisper')
+    return 'faster-whisper';
+  // Default local path: faster-whisper (CPU INT8 small model).
+  return 'faster-whisper';
+}
+
+function createTranscriptionProvider(): TranscriptionProvider {
+  const id = resolveTranscriptionProviderId();
+  if (id === 'gemini') return new GeminiTranscriptionProvider();
+  if (id === 'whisper') return new WhisperTranscriptionProvider();
+  if (id === 'faster-whisper') return createFasterWhisperProviderFromEnv();
+  return new OfflineTranscriptionProvider();
+}
+
+/** OCR engine: trocr (stronger) → paddle. Override with COMIC_OCR_ENGINE. */
+function resolveOcrEngineId(): string {
+  const forced = process.env.COMIC_OCR_ENGINE;
+  if (forced === 'paddle' || forced === 'trocr') return forced;
+  return 'trocr';
+}
+
 const alignmentEngine = new ImageAlignmentEngine();
 const textDifferenceEngine = new TextDifferenceEngine();
 const bubbleDetectionEngine = new BubbleDetectionEngine();
 const bubbleAssociationEngine = new BubbleDialogueAssociationEngine();
 const safeRegionEngine = new CaptionSafeRegionEngine();
 const captionFittingEngine = new CaptionFittingEngine();
+/** Comic-aware page detection: bubbles + text regions + OCR association. */
+const pageDetectionCoordinator = new PageDetectionCoordinator({
+  recognizeOcr: async (image, space) => {
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(image).metadata();
+    const sha256 = createHash('sha256').update(image).digest('hex');
+    const result = await scanWithLocalOCR(image, {
+      id: `detect-page-${sha256.slice(0, 12)}`,
+      role: 'original',
+      filename: 'detect-page',
+      format: meta.format === 'jpeg' ? 'JPEG' : meta.format === 'webp' ? 'WEBP' : 'PNG',
+      mediaType:
+        meta.format === 'jpeg'
+          ? 'image/jpeg'
+          : meta.format === 'webp'
+            ? 'image/webp'
+            : 'image/png',
+      dimensions: {
+        width: space.dimensions.width,
+        height: space.dimensions.height,
+      },
+      sizeBytes: image.byteLength,
+      sha256,
+    });
+    return result.document;
+  },
+});
+/** Lettering removal / clean-page generation (server-side, sequential). */
+const cleanPageCoordinator = new CleanPageCoordinator({
+  generative: createLamaProviderFromEnv(),
+});
 /** Lazily cached ONNX sessions (YOLO proposals + wav2vec2 CTC). */
 let yoloSessionPromise: Promise<unknown> | null = null;
 let wav2vecProviderPromise: Promise<unknown> | null = null;
@@ -104,6 +194,8 @@ interface ApiState {
     readonly differencePng: Buffer;
   } | null;
   textDifferences: TextDifferenceResult | null;
+  /** Test injection for acoustic forced alignment (skips ONNX load). */
+  readonly ctcProviderOverride?: CtcFramePosteriorsProvider;
 }
 
 class RequestError extends Error {
@@ -565,9 +657,19 @@ function mapDetectedBubble(bubble: {
   readonly id: string;
   readonly kind: string;
   readonly polygon: { readonly points: readonly unknown[] };
+  readonly contour?: { readonly points: readonly unknown[] };
+  readonly boundingBox?: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly coordinateSpace?: unknown;
+  };
   readonly confidence: number;
   readonly classificationConfidence?: number;
   readonly shape: string;
+  readonly coordinateSpace?: { readonly id?: string };
+  readonly algorithmVersion?: string;
   readonly tail?: { readonly points: readonly unknown[] } | null;
 }): Record<string, unknown> {
   return {
@@ -575,8 +677,14 @@ function mapDetectedBubble(bubble: {
     kind: bubble.kind,
     shape: bubble.shape,
     polygon: bubble.polygon,
+    contour: bubble.contour ?? bubble.polygon,
+    boundingBox: bubble.boundingBox ?? null,
     confidence: bubble.confidence,
     classificationConfidence: bubble.classificationConfidence,
+    // Deterministic geometry owns final contours; model output is proposals.
+    geometryProvenance: 'derived',
+    algorithmVersion: bubble.algorithmVersion ?? 'bubble-cv-2',
+    coordinateSpaceId: bubble.coordinateSpace?.id ?? null,
     tail: bubble.tail?.points ?? null,
   };
 }
@@ -584,8 +692,10 @@ function mapDetectedBubble(bubble: {
 /** Hybrid bubble → API shape, including ML/heuristic provenance. */
 function mapHybridBubble(entry: HybridBubble): Record<string, unknown> {
   const { bubble, sources, support, quality } = entry;
+  const hasModel = support.some((item) => item.provenance === 'ml');
   return {
     ...mapDetectedBubble(bubble),
+    geometryProvenance: hasModel ? 'hybrid' : 'derived',
     sources,
     quality,
     support: support.map((item) => ({
@@ -598,7 +708,10 @@ function mapHybridBubble(entry: HybridBubble): Record<string, unknown> {
   };
 }
 
-async function loadWav2vec2ProviderOrThrow(): Promise<CtcFramePosteriorsProvider> {
+async function loadWav2vec2ProviderOrThrow(
+  state?: ApiState,
+): Promise<CtcFramePosteriorsProvider> {
+  if (state?.ctcProviderOverride) return state.ctcProviderOverride;
   try {
     wav2vecProviderPromise ??= loadWav2vec2CtcProvider();
     return (await wav2vecProviderPromise) as CtcFramePosteriorsProvider;
@@ -636,6 +749,7 @@ async function refineTranscriptWordTimes(
   audioBytes: Uint8Array,
   asset: { readonly timebase: { readonly id: string } },
   signal?: AbortSignal,
+  state?: ApiState,
 ): Promise<{
   readonly transcript: unknown;
   readonly acousticAlignment: {
@@ -651,7 +765,7 @@ async function refineTranscriptWordTimes(
     const decoded = await decodeAudioToPcm(audioBytes, {
       sampleRateHz: 16_000,
     });
-    const provider = await loadWav2vec2ProviderOrThrow();
+    const provider = await loadWav2vec2ProviderOrThrow(state);
     const alignment = await alignWordsAcoustic({
       segments: transcript.segments.map((segment) => ({
         id: segment.id,
@@ -870,6 +984,8 @@ async function handleRequest(
       service: serviceName,
       configuration: {
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
+        transcriptionProvider: resolveTranscriptionProviderId(),
+        ocrEngine: resolveOcrEngineId(),
       },
     });
     return;
@@ -965,6 +1081,141 @@ async function handleRequest(
     return;
   }
 
+  // -------------------------------------------------------------------------
+  // Remotion motion-comic export jobs (explicit create → poll → download).
+  // -------------------------------------------------------------------------
+
+  if (request.method === 'GET' && request.url === '/api/video/export') {
+    try {
+      const availability = await checkVideoExportAvailability();
+      sendJson(response, 200, {
+        ...availability,
+        jobs: listVideoExportJobs(),
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_PROBE_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not probe Remotion video export.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/video/export') {
+    try {
+      const value = (await readJsonBody(request, 80 * 1024 * 1024)) as Record<
+        string,
+        unknown
+      >;
+      const job = await createVideoExportJob(
+        value as unknown as VideoExportRequest,
+      );
+      sendJson(response, 202, { job });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        const status =
+          error.code === 'NOT_FOUND'
+            ? 404
+            : error.code === 'INVALID_INPUT' || error.code === 'VALIDATION_FAILED'
+              ? 400
+              : 500;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Video export job creation failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  const videoExportJobMatch = /^\/api\/video\/export\/([A-Za-z0-9-]+)$/.exec(
+    request.url ?? '',
+  );
+  if (request.method === 'GET' && videoExportJobMatch) {
+    try {
+      sendJson(response, 200, { job: getVideoExportJob(videoExportJobMatch[1]!) });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message: error instanceof Error ? error.message : 'Lookup failed.',
+        },
+      });
+    }
+    return;
+  }
+  if (request.method === 'DELETE' && videoExportJobMatch) {
+    try {
+      sendJson(response, 200, {
+        job: cancelVideoExportJob(videoExportJobMatch[1]!),
+      });
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message: error instanceof Error ? error.message : 'Cancel failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  const videoExportFileMatch =
+    /^\/api\/video\/export\/([A-Za-z0-9-]+)\/file$/.exec(request.url ?? '');
+  if (request.method === 'GET' && videoExportFileMatch) {
+    try {
+      const artifact = await readVideoExportArtifact(videoExportFileMatch[1]!);
+      response.writeHead(200, {
+        'content-type': 'video/mp4',
+        'content-length': String(artifact.bytes.byteLength),
+        'content-disposition': `attachment; filename="${artifact.fileName}"`,
+        'x-content-type-options': 'nosniff',
+      });
+      response.end(artifact.bytes);
+    } catch (error) {
+      if (error instanceof VideoExportError) {
+        sendJson(response, error.code === 'NOT_FOUND' ? 404 : 500, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'VIDEO_EXPORT_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Download failed.',
+        },
+      });
+    }
+    return;
+  }
+
   if (request.method === 'POST' && request.url === '/api/assist') {
     if (!process.env.GEMINI_API_KEY) {
       sendJson(response, 503, {
@@ -1013,33 +1264,60 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && request.url === '/api/transcribe') {
-    if (!process.env.GEMINI_API_KEY) {
-      sendJson(response, 503, {
-        error: {
-          code: 'TRANSCRIPTION_NOT_CONFIGURED',
-          message: 'Gemini transcription is not configured on the API server.',
-        },
-      });
-      return;
-    }
     try {
       const { audio, asset } = await readMultipartAudio(request);
       const controller = new AbortController();
       request.once('aborted', () => controller.abort());
-      const transcript = await new TranscriptionService(
-        new GeminiTranscriptionProvider(),
-      ).transcribe({
-        asset,
-        bytes: new Uint8Array(
-          audio.bytes.buffer,
-          audio.bytes.byteOffset,
-          audio.bytes.byteLength,
-        ),
-        signal: controller.signal,
-      });
+      // faster-whisper / whisper → Gemini → offline stub. COMIC_ASR forces a path.
+      let provider = createTranscriptionProvider();
+      let transcript;
+      try {
+        transcript = await new TranscriptionService(provider).transcribe({
+          asset,
+          bytes: new Uint8Array(
+            audio.bytes.buffer,
+            audio.bytes.byteOffset,
+            audio.bytes.byteLength,
+          ),
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        const missingModel =
+          cause instanceof Error &&
+          (cause.name === 'WhisperTranscriptionError' ||
+            cause.name === 'FasterWhisperError' ||
+            (cause as { code?: string }).code === 'UNAVAILABLE' ||
+            (cause as { code?: string }).code === 'MODEL_MISSING' ||
+            /MODEL_MISSING|MODEL_LOAD_FAILED|UNAVAILABLE/i.test(cause.message));
+        const localDefault =
+          resolveTranscriptionProviderId() === 'whisper' ||
+          resolveTranscriptionProviderId() === 'faster-whisper';
+        if (
+          missingModel &&
+          localDefault &&
+          process.env.COMIC_ASR !== 'whisper' &&
+          process.env.COMIC_ASR !== 'faster-whisper' &&
+          process.env.COMIC_ASR !== 'faster_whisper'
+        ) {
+          provider = process.env.GEMINI_API_KEY
+            ? new GeminiTranscriptionProvider()
+            : new OfflineTranscriptionProvider();
+          transcript = await new TranscriptionService(provider).transcribe({
+            asset,
+            bytes: new Uint8Array(
+              audio.bytes.buffer,
+              audio.bytes.byteOffset,
+              audio.bytes.byteLength,
+            ),
+            signal: controller.signal,
+          });
+        } else {
+          throw cause;
+        }
+      }
 
       // WhisperX-style refinement: wav2vec2 CTC forced alignment of transcript
-      // words to acoustic frames. Falls back to Gemini timings when weights or
+      // words to acoustic frames. Falls back to provider timings when weights or
       // FFmpeg are unavailable.
       const refined = await refineTranscriptWordTimes(
         transcript,
@@ -1050,10 +1328,12 @@ async function handleRequest(
         ),
         asset,
         controller.signal,
+        state,
       );
       sendJson(response, 200, {
         transcript: refined.transcript,
         acousticAlignment: refined.acousticAlignment,
+        provider: provider.providerId,
       });
     } catch (error) {
       if (error instanceof RequestError) {
@@ -1153,12 +1433,15 @@ async function handleRequest(
         yoloSessionPromise ??= loadYoloOnnxSession();
         const yoloSession = (await yoloSessionPromise) as ConstructorParameters<
           typeof YoloBubbleProposalProvider
-        >[0]['session'];
+        >[0]['session'] & { classLabels?: readonly string[] };
         providerName = yoloSession.name;
         detector = new HybridBubbleDetector({
           deterministic: bubbleDetectionEngine,
           provider: new YoloBubbleProposalProvider({
             session: yoloSession,
+            ...(yoloSession.classLabels
+              ? { classLabels: yoloSession.classLabels }
+              : {}),
             confidenceThreshold: Number(value.confidenceThreshold ?? 0.25),
             bubbleClassesOnly: value.bubbleClassesOnly !== false,
             maximumProposals: Number(value.maximumProposals ?? 32),
@@ -1228,6 +1511,205 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'POST' && request.url === '/api/detect-page') {
+    try {
+      const value = asRecord(await readJsonBody(request, 50 * 1024 * 1024));
+      const imageBase64 =
+        typeof value.pageImage === 'string' ? value.pageImage : null;
+      if (!imageBase64) {
+        throw new RequestError(
+          400,
+          'INVALID_DETECT_REQUEST',
+          'Provide pageImage as base64-encoded PNG/JPEG bytes.',
+        );
+      }
+      const normalized = imageBase64.includes(',')
+        ? imageBase64.slice(imageBase64.indexOf(',') + 1)
+        : imageBase64;
+      const imageBytes = new Uint8Array(Buffer.from(normalized, 'base64'));
+      const width = Number(value.width ?? 0);
+      const height = Number(value.height ?? 0);
+      const includeOcr = value.includeOcr !== false;
+      const result = await pageDetectionCoordinator.detect({
+        pageImage: imageBytes,
+        ...(Number.isFinite(width) && width > 0 ? { width } : {}),
+        ...(Number.isFinite(height) && height > 0 ? { height } : {}),
+        ...(typeof value.spaceId === 'string' && value.spaceId
+          ? { spaceId: value.spaceId }
+          : {}),
+        ...(typeof value.requestId === 'string' && value.requestId
+          ? { requestId: value.requestId }
+          : {}),
+        includeOcr,
+        ...(typeof value.confidenceThreshold === 'number'
+          ? { confidenceThreshold: value.confidenceThreshold }
+          : {}),
+        ...(typeof value.maximumProposals === 'number'
+          ? { maximumProposals: value.maximumProposals }
+          : {}),
+        requireYolo: value.requireYolo === true,
+      });
+      if (request.aborted || response.destroyed) return;
+      sendJson(response, result.status === 'stale' ? 409 : 200, {
+        ...result,
+        // JSON-safe: freeze() objects serialize as plain values.
+        bubbles: result.bubbles.map((bubble) => ({
+          ...bubble,
+          // Ensure geometry payloads are plain JSON.
+          polygon: bubble.polygon,
+          contour: bubble.contour,
+          boundingBox: bubble.boundingBox,
+        })),
+        textRegions: result.textRegions,
+      });
+    } catch (error) {
+      if (request.aborted || response.destroyed) return;
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof PageDetectionError) {
+        const status =
+          error.code === 'INVALID_REQUEST'
+            ? 400
+            : error.code === 'IMAGE_TOO_LARGE'
+              ? 413
+              : error.code === 'MODEL_MISSING'
+                ? 503
+                : 422;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'PAGE_DETECTION_FAILED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Page detection failed.',
+        },
+      });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && request.url === '/api/clean-page') {
+    try {
+      const value = asRecord(await readJsonBody(request, 50 * 1024 * 1024));
+      const imageBase64 =
+        typeof value.pageImage === 'string' ? value.pageImage : null;
+      if (!imageBase64) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'Provide pageImage as base64-encoded PNG/JPEG or raw RGBA bytes.',
+        );
+      }
+      const normalized = imageBase64.includes(',')
+        ? imageBase64.slice(imageBase64.indexOf(',') + 1)
+        : imageBase64;
+      const encoded = new Uint8Array(Buffer.from(normalized, 'base64'));
+      const width = Number(value.width ?? 0);
+      const height = Number(value.height ?? 0);
+      const raster = await decodeCleanRaster(encoded, width, height);
+      const textRegions = parseCleanTextRegions(value.textRegions, raster, spaceIdFrom(value));
+      const bubbles = parseCleanBubbles(value.bubbles);
+      const manualEdits = parseManualEdits(value.manualEdits, raster.width, raster.height);
+      const result = await cleanPageCoordinator.cleanPage({
+        image: raster,
+        ...(typeof value.spaceId === 'string' && value.spaceId
+          ? { spaceId: value.spaceId }
+          : {}),
+        ...(typeof value.requestId === 'string' && value.requestId
+          ? { requestId: value.requestId }
+          : {}),
+        textRegions,
+        bubbles,
+        manualEdits,
+        ...(value.options && typeof value.options === 'object'
+          ? {
+              options: {
+                ...((value.options as Record<string, unknown>).expansionPx !==
+                undefined
+                  ? {
+                      expansionPx: Number(
+                        (value.options as Record<string, unknown>).expansionPx,
+                      ),
+                    }
+                  : {}),
+                preferLamaForArtwork:
+                  (value.options as Record<string, unknown>)
+                    .preferLamaForArtwork !== false,
+                erasureScope:
+                  (value.options as Record<string, unknown>).erasureScope ===
+                  'approved'
+                    ? ('approved' as const)
+                    : ('bubble-interior' as const),
+              },
+            }
+          : {}),
+      });
+      if (request.aborted || response.destroyed) return;
+      if (result.status === 'stale') {
+        sendJson(response, 409, {
+          error: {
+            code: 'STALE_CLEAN_REQUEST',
+            message:
+              'A newer cleaning request superseded this one; discard these results.',
+          },
+          ...result,
+        });
+        return;
+      }
+      // Return PNG as base64 plus a JSON-safe summary.
+      sendJson(response, 200, {
+        requestId: result.requestId,
+        status: result.status,
+        width: result.width,
+        height: result.height,
+        cleanedPng: Buffer.from(result.cleanedPng).toString('base64'),
+        removalMask: Buffer.from(result.removalMask).toString('base64'),
+        regions: result.regions,
+        warnings: result.warnings,
+        methodSummary: result.methodSummary,
+        complete: result.complete,
+        lamaAvailable: result.lamaAvailable,
+      });
+    } catch (error) {
+      if (request.aborted || response.destroyed) return;
+      if (error instanceof RequestError) {
+        sendJson(response, error.statusCode, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      if (error instanceof CleanPageError) {
+        const status =
+          error.code === 'INVALID_REQUEST'
+            ? 400
+            : error.code === 'IMAGE_TOO_LARGE'
+              ? 413
+              : 422;
+        sendJson(response, status, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
+      sendJson(response, 500, {
+        error: {
+          code: 'CLEAN_PAGE_FAILED',
+          message:
+            error instanceof Error ? error.message : 'Page cleaning failed.',
+        },
+      });
+    }
+    return;
+  }
+
   if (request.method === 'POST' && request.url === '/api/align-words') {
     try {
       const value = asRecord(await readJsonBody(request, 60 * 1024 * 1024));
@@ -1248,6 +1730,13 @@ async function handleRequest(
           'Provide segments[] with text and start/end seconds.',
         );
       }
+      if (segments.length > 2000) {
+        throw new RequestError(
+          400,
+          'INVALID_ALIGN_REQUEST',
+          'At most 2000 transcript segments are accepted per alignment.',
+        );
+      }
       if (!pcmBase64 && !audioBase64) {
         throw new RequestError(
           400,
@@ -1255,10 +1744,28 @@ async function handleRequest(
           'Provide pcm (base64 Float32LE) or audio (base64 compressed bytes).',
         );
       }
+      if (
+        !Number.isFinite(sampleRateHz) ||
+        sampleRateHz < 8_000 ||
+        sampleRateHz > 192_000
+      ) {
+        throw new RequestError(
+          400,
+          'INVALID_ALIGN_REQUEST',
+          'sampleRateHz must be between 8000 and 192000.',
+        );
+      }
 
       let pcm: Float32Array;
       if (pcmBase64) {
         const buffer = Buffer.from(pcmBase64, 'base64');
+        if (buffer.byteLength === 0) {
+          throw new RequestError(
+            400,
+            'INVALID_ALIGN_REQUEST',
+            'Decoded PCM is empty.',
+          );
+        }
         pcm = new Float32Array(
           buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
         );
@@ -1267,10 +1774,17 @@ async function handleRequest(
           new Uint8Array(Buffer.from(audioBase64!, 'base64')),
           { sampleRateHz },
         );
+        if (decoded.pcm.length === 0) {
+          throw new RequestError(
+            400,
+            'INVALID_ALIGN_REQUEST',
+            'Decoded audio is empty.',
+          );
+        }
         pcm = decoded.pcm;
       }
 
-      const provider = await loadWav2vec2ProviderOrThrow();
+      const provider = await loadWav2vec2ProviderOrThrow(state);
       const alignment = await alignWordsAcoustic({
         segments: segments.map((item, index) => {
           const segment = asRecord(item);
@@ -1283,12 +1797,26 @@ async function handleRequest(
               `Segment ${index + 1} needs finite start < end in seconds.`,
             );
           }
+          const text = typeof segment.text === 'string' ? segment.text : '';
+          const words = Array.isArray(segment.words)
+            ? (segment.words as unknown[])
+                .map((w) => String(w))
+                .filter((w) => w.trim().length > 0)
+            : undefined;
+          if (!text.trim() && (!words || words.length === 0)) {
+            throw new RequestError(
+              400,
+              'INVALID_ALIGN_REQUEST',
+              `Segment ${index + 1} needs non-empty text or words[].`,
+            );
+          }
           return {
             id:
               typeof segment.id === 'string' && segment.id
                 ? segment.id
                 : `segment-${index + 1}`,
-            text: typeof segment.text === 'string' ? segment.text : '',
+            text,
+            ...(words && words.length > 0 ? { words } : {}),
             interval: {
               start: {
                 value: start,
@@ -1459,12 +1987,15 @@ async function handleRequest(
         yoloSessionPromise ??= loadYoloOnnxSession();
         const yoloSession = (await yoloSessionPromise) as ConstructorParameters<
           typeof YoloBubbleProposalProvider
-        >[0]['session'];
+        >[0]['session'] & { classLabels?: readonly string[] };
         proposalProviderName = `yolo:${yoloSession.name}`;
         detector = new HybridBubbleDetector({
           deterministic: bubbleDetectionEngine,
           provider: new YoloBubbleProposalProvider({
             session: yoloSession,
+            ...(yoloSession.classLabels
+              ? { classLabels: yoloSession.classLabels }
+              : {}),
             confidenceThreshold: 0.25,
             bubbleClassesOnly: true,
             maximumProposals: 32,
@@ -2093,15 +2624,281 @@ async function handleRequest(
   sendJson(response, 404, { error: 'Not found' });
 }
 
-export function createApiServer(): Server {
+export interface CreateApiServerOptions {
+  /**
+   * Inject a CTC frame-posteriors provider (tests use
+   * `SyntheticCtcPosteriorsProvider`) so unit tests need no ONNX weights.
+   */
+  readonly ctcProvider?: CtcFramePosteriorsProvider;
+}
+
+export function createApiServer(options: CreateApiServerOptions = {}): Server {
   const state: ApiState = {
     sourceImages: new Map(),
     alignment: null,
     visualizations: null,
     textDifferences: null,
+    ...(options.ctcProvider ? { ctcProviderOverride: options.ctcProvider } : {}),
   };
   return createServer((request, response) => {
     void handleRequest(request, response, state);
+  });
+}
+
+function spaceIdFrom(value: Record<string, unknown>): string | undefined {
+  return typeof value.spaceId === 'string' && value.spaceId
+    ? value.spaceId
+    : undefined;
+}
+
+async function decodeCleanRaster(
+  encoded: Uint8Array,
+  width: number,
+  height: number,
+): Promise<{ width: number; height: number; data: Uint8ClampedArray }> {
+  const sharp = (await import('sharp')).default;
+  // Raw RGBA when width/height are supplied and length matches.
+  if (
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0 &&
+    encoded.byteLength === width * height * 4
+  ) {
+    return {
+      width,
+      height,
+      data: new Uint8ClampedArray(
+        encoded.buffer,
+        encoded.byteOffset,
+        encoded.byteLength,
+      ),
+    };
+  }
+  try {
+    const { data, info } = await sharp(encoded)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return {
+      width: info.width,
+      height: info.height,
+      data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength),
+    };
+  } catch {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'pageImage could not be decoded as PNG/JPEG/RGBA.',
+    );
+  }
+}
+
+function parseCleanTextRegions(
+  value: unknown,
+  raster: { width: number; height: number },
+  spaceId: string | undefined,
+): LetteringSourceRegion[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'textRegions must be an array.',
+    );
+  }
+  const space = createImageSpace(
+    spaceId ?? `image:clean-${raster.width}x${raster.height}`,
+    raster.width,
+    raster.height,
+  );
+  return value.map((item, index) => {
+    const region = asRecord(item);
+    const id =
+      typeof region.id === 'string' && region.id
+        ? region.id
+        : `region-${index + 1}`;
+    const source: {
+      id: string;
+      boundingBox?: LetteringSourceRegion['boundingBox'];
+      polygon?: LetteringSourceRegion['polygon'];
+      mask?: Uint8Array;
+      associatedBubbleId?: string | null;
+      detectionConfidence?: number;
+      reviewStatus?: LetteringSourceRegion['reviewStatus'];
+      approved?: boolean;
+    } = { id };
+    if (Array.isArray(region.boundingBox)) {
+      const [x, y, w, h] = region.boundingBox as number[];
+      source.boundingBox = {
+        x: Number(x),
+        y: Number(y),
+        width: Number(w),
+        height: Number(h),
+        coordinateSpace: space,
+      };
+    } else if (region.boundingBox && typeof region.boundingBox === 'object') {
+      const box = asRecord(region.boundingBox);
+      source.boundingBox = {
+        x: Number(box.x),
+        y: Number(box.y),
+        width: Number(box.width),
+        height: Number(box.height),
+        coordinateSpace: space,
+      };
+    }
+    if (Array.isArray(region.polygon) && region.polygon.length >= 3) {
+      source.polygon = {
+        coordinateSpace: space,
+        points: (region.polygon as unknown[]).map((point) => {
+          const p = asRecord(point);
+          return {
+            x: Number(p.x),
+            y: Number(p.y),
+            coordinateSpace: space,
+          };
+        }),
+      };
+    }
+    if (typeof region.mask === 'string') {
+      source.mask = new Uint8Array(Buffer.from(region.mask, 'base64'));
+    }
+    if (typeof region.associatedBubbleId === 'string') {
+      source.associatedBubbleId = region.associatedBubbleId;
+    } else if (region.associatedBubbleId === null) {
+      source.associatedBubbleId = null;
+    }
+    if (typeof region.detectionConfidence === 'number') {
+      source.detectionConfidence = region.detectionConfidence;
+    }
+    if (
+      region.reviewStatus === 'pending' ||
+      region.reviewStatus === 'accepted' ||
+      region.reviewStatus === 'rejected' ||
+      region.reviewStatus === 'edited'
+    ) {
+      source.reviewStatus = region.reviewStatus;
+    }
+    if (region.approved === true) source.approved = true;
+    return source as LetteringSourceRegion;
+  });
+}
+
+function parseCleanBubbles(value: unknown): {
+  id: string;
+  contour: { points: readonly { x: number; y: number }[] };
+  boundingBox?: { x: number; y: number; width: number; height: number };
+  interiorHint?:
+    | 'white-balloon'
+    | 'coloured-balloon'
+    | 'textured-balloon'
+    | 'artwork'
+    | 'unknown';
+}[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'bubbles must be an array.',
+    );
+  }
+  return value.map((item, index) => {
+    const bubble = asRecord(item);
+    const contour = asRecord(bubble.contour);
+    const points = Array.isArray(contour.points)
+      ? contour.points
+      : Array.isArray(bubble.polygon)
+        ? bubble.polygon
+        : [];
+    const hint = bubble.interiorHint;
+    const interiorHint =
+      hint === 'white-balloon' ||
+      hint === 'coloured-balloon' ||
+      hint === 'textured-balloon' ||
+      hint === 'artwork' ||
+      hint === 'unknown'
+        ? hint
+        : undefined;
+    const box = asRecord(bubble.boundingBox);
+    const boundingBox =
+      typeof box.x === 'number' &&
+      typeof box.y === 'number' &&
+      typeof box.width === 'number' &&
+      typeof box.height === 'number'
+        ? {
+            x: box.x,
+            y: box.y,
+            width: box.width,
+            height: box.height,
+          }
+        : undefined;
+    return {
+      id:
+        typeof bubble.id === 'string' && bubble.id
+          ? bubble.id
+          : `bubble-${index + 1}`,
+      contour: {
+        points: (points as unknown[]).map((point) => {
+          const p = asRecord(point);
+          return { x: Number(p.x), y: Number(p.y) };
+        }),
+      },
+      ...(boundingBox ? { boundingBox } : {}),
+      ...(interiorHint ? { interiorHint } : {}),
+    };
+  });
+}
+
+function parseManualEdits(
+  value: unknown,
+  width: number,
+  height: number,
+): {
+  regionId?: string;
+  addPixels?: Uint8Array;
+  excludePixels?: Uint8Array;
+}[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new RequestError(
+      400,
+      'INVALID_CLEAN_REQUEST',
+      'manualEdits must be an array.',
+    );
+  }
+  const pixelCount = width * height;
+  return value.map((item) => {
+    const edit = asRecord(item);
+    const out: {
+      regionId?: string;
+      addPixels?: Uint8Array;
+      excludePixels?: Uint8Array;
+    } = {};
+    if (typeof edit.regionId === 'string') out.regionId = edit.regionId;
+    if (typeof edit.addPixels === 'string') {
+      const pixels = new Uint8Array(Buffer.from(edit.addPixels, 'base64'));
+      if (pixels.length !== pixelCount) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'manual addPixels must match page dimensions.',
+        );
+      }
+      out.addPixels = pixels;
+    }
+    if (typeof edit.excludePixels === 'string') {
+      const pixels = new Uint8Array(Buffer.from(edit.excludePixels, 'base64'));
+      if (pixels.length !== pixelCount) {
+        throw new RequestError(
+          400,
+          'INVALID_CLEAN_REQUEST',
+          'manual excludePixels must match page dimensions.',
+        );
+      }
+      out.excludePixels = pixels;
+    }
+    return out;
   });
 }
 

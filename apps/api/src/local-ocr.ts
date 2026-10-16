@@ -17,6 +17,11 @@ import {
   resizeOCRPixels,
 } from '@comic-captioner/shared/ocr-preprocessing';
 import { createImageSpace } from '@comic-captioner/shared';
+import {
+  TrocrRecognizer,
+  fullPageRegion,
+  type TrocrRegion,
+} from './trocr-ocr.js';
 
 const MODEL_URLS = {
   detection:
@@ -255,6 +260,124 @@ export async function scanWithLocalOCR(
   }
 }
 
+/** TrOCR recognition over bubble crops (or full page). Stronger lettering model. */
+async function scanWithTrocr(
+  bytes: Uint8Array,
+  metadata: SourceImageMetadata,
+  options: OCRScanOptions,
+  imageSpace: ReturnType<typeof createImageSpace>,
+): Promise<OCRScanResult> {
+  const started = performance.now();
+  const recognizer = new TrocrRecognizer();
+  const candidates = (options.bubbles ?? []).filter(
+    (bubble) => bubble.reviewStatus !== 'rejected',
+  );
+  const regions: readonly TrocrRegion[] = candidates.length
+    ? candidates.map((bubble, index) => {
+        const xs = bubble.polygon.map((point) => point.x);
+        const ys = bubble.polygon.map((point) => point.y);
+        const x = Math.min(...xs);
+        const y = Math.min(...ys);
+        return {
+          id: bubble.id || `region-${index + 1}`,
+          bounds: {
+            x,
+            y,
+            width: Math.max(1, Math.max(...xs) - x),
+            height: Math.max(1, Math.max(...ys) - y),
+            coordinateSpace: imageSpace,
+          },
+        };
+      })
+    : fullPageRegion(imageSpace);
+
+  const raw = await recognizer.recognizeRegions(bytes, regions, imageSpace);
+  const blocks: OCRBlock[] = [];
+  for (const block of raw.blocks) {
+    if (!block.text.trim()) continue;
+    const box: Bounds<ImageSpace> = {
+      x: block.boundingBox.x,
+      y: block.boundingBox.y,
+      width: block.boundingBox.width,
+      height: block.boundingBox.height,
+      coordinateSpace: imageSpace,
+    };
+    const lines: OCRLine[] = block.lines.map((line) => {
+      const lineBox: Bounds<ImageSpace> = {
+        x: line.boundingBox.x,
+        y: line.boundingBox.y,
+        width: line.boundingBox.width,
+        height: line.boundingBox.height,
+        coordinateSpace: imageSpace,
+      };
+      const words: OCRWord[] = line.words.map((word) => ({
+        id: word.id,
+        text: word.text,
+        confidence: word.confidence,
+        boundingBox: {
+          x: word.boundingBox.x,
+          y: word.boundingBox.y,
+          width: word.boundingBox.width,
+          height: word.boundingBox.height,
+          coordinateSpace: imageSpace,
+        },
+        coordinateSpace: imageSpace,
+      }));
+      return {
+        id: line.id,
+        text: line.text,
+        boundingBox: lineBox,
+        confidence: line.confidence,
+        coordinateSpace: imageSpace,
+        words,
+      };
+    });
+    if (lines.length === 0) continue;
+    blocks.push({
+      id: block.id,
+      text: block.text,
+      boundingBox: box,
+      confidence: block.confidence,
+      coordinateSpace: imageSpace,
+      lines,
+    });
+  }
+  const allLines = blocks.flatMap((block) => block.lines);
+  const confidence = allLines.length
+    ? allLines.reduce((sum, line) => sum + line.confidence, 0) / allLines.length
+    : 0;
+  const bounds = allLines.length
+    ? unionBounds(allLines.map((line) => line.boundingBox), imageSpace)
+    : fullBounds(imageSpace);
+  const document: OCRDocument = {
+    id: `trocr:${metadata.sha256.slice(0, 24)}:${options.enhanced ? 'enhanced' : 'original'}`,
+    text: blocks.map((block) => block.text).join('\n\n'),
+    boundingBox: bounds,
+    confidence,
+    coordinateSpace: imageSpace,
+    blocks,
+    revision: 1,
+    reviewStatus: 'pending-review',
+    provenance: {
+      source: '@xenova/transformers',
+      version: 'trocr-small-printed',
+      inputHashes: [metadata.sha256],
+    },
+  };
+  return {
+    document,
+    preprocessing: options.enhanced ? 'enhanced' : 'original',
+    metrics: {
+      initializationMs: Math.max(0, performance.now() - started),
+      detectionMs: 0,
+      recognitionMs: performance.now() - started,
+      totalMs: performance.now() - started,
+      detectedTextRegions: allLines.length,
+      averageConfidence: confidence,
+    },
+  };
+}
+
 async function scanUncached(
   bytes: Uint8Array,
   metadata: SourceImageMetadata,
@@ -268,6 +391,17 @@ async function scanUncached(
     metadata.dimensions.width,
     metadata.dimensions.height,
   );
+
+  // TrOCR path (stronger printed/comic lettering). Falls back to PaddleOCR.
+  if ((process.env.COMIC_OCR_ENGINE ?? 'trocr') === 'trocr') {
+    try {
+      return await scanWithTrocr(bytes, metadata, options, imageSpace);
+    } catch (cause) {
+      if (process.env.COMIC_OCR_ENGINE === 'trocr') throw cause;
+      // auto: fall through to Paddle
+    }
+  }
+
   const initStarted = performance.now();
   const engine = await getEngine();
   const initializationMs =

@@ -18,7 +18,11 @@
     "@comic-captioner/image-engine": "workspace:*",
     "@comic-captioner/rendering": "workspace:*",
     "@comic-captioner/shared": "workspace:*",
+    "@comic-captioner/video-composer": "workspace:*",
     "@paddleocr/paddleocr-js": "0.4.2",
+    "@remotion/bundler": "4.0.535",
+    "@remotion/renderer": "4.0.535",
+    "@xenova/transformers": "^2.17.2",
     "onnxruntime-node": "^1.30.0",
     "sharp": "^0.34.4"
   },

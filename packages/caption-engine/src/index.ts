@@ -6,6 +6,18 @@ import type { ImageSpace, Point, Polygon } from '@comic-captioner/shared';
 import type { CaptionSafeRegion } from '@comic-captioner/bubble-engine';
 
 export { TimelineEngine, TimelineError } from './timeline.js';
+export {
+  TimelineMappingError,
+  chunkAlignedWordsForTimeline,
+  mapAlignedCaptionsToTimeline,
+  buildTimelineFromAlignedWords,
+  timelineCuesFromDialogueEvents,
+} from './timeline-mapping.js';
+export type {
+  AlignedCaptionUnit,
+  ChunkAlignedWordsOptions,
+  TimelineCaptionAssignment,
+} from './timeline-mapping.js';
 export { proposePagePacing, PagePacingError } from './page-pacing.js';
 export type {
   PageDialogueSegmentRef,

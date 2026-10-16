@@ -43,6 +43,41 @@ export type {
   RasterImage,
 } from './inpaint.js';
 export {
+  TextRegionDetectionError,
+  TextRegionDetector,
+} from './text-regions.js';
+export type {
+  DetectedTextRegion,
+  TextRegionDetectionOptions,
+  TextRegionDetectionResult,
+  TextRegionDetectionSource,
+  TextRegionDetectorOptions,
+  TextRegionGeometryProvenance,
+  TextRegionKindHint,
+  TextRegionProposal,
+  TextRegionProposalProvider,
+} from './text-regions.js';
+export {
+  LetteringRemovalError,
+  LetteringRemover,
+} from './lettering-removal.js';
+export type {
+  GenerativeInpaintProvider,
+  LetteringBubbleInput,
+  LetteringErasureScope,
+  LetteringRemovalInput,
+  LetteringRemovalMethod,
+  LetteringRemovalOptions,
+  LetteringRemovalResult,
+  LetteringRegionContext,
+  LetteringRegionResult,
+  LetteringRemoverOptions,
+  LetteringSourceRegion,
+  LetteringWarning,
+  LetteringWarningCode,
+  ManualMaskEdit,
+} from './lettering-removal.js';
+export {
   TextDifferenceEngine,
   TextDifferenceError,
 } from './text-difference.js';

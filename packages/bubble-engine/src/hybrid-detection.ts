@@ -4,7 +4,6 @@ import {
   type Bounds,
   type ImageSpace,
   type MaskRun,
-  type Point,
   type Polygon,
 } from '@comic-captioner/shared';
 import {
@@ -274,11 +273,7 @@ export class HybridBubbleDetector {
           bubble,
           sources: sourcesFor(entry),
           support: Object.freeze(entry.support),
-          quality: computeGeometryQuality(
-            gray,
-            entry.bubble.boundingBox,
-            coordinateSpace,
-          ),
+          quality: computeGeometryQuality(gray, entry.bubble.boundingBox),
         });
       })
       .sort(
@@ -462,7 +457,6 @@ async function decodeGray(
 function computeGeometryQuality(
   gray: GrayRaster,
   boundingBox: Bounds<ImageSpace>,
-  space: ImageSpace,
 ): GeometryQuality {
   const minX = clampInt(
     Math.floor((boundingBox.x + 0.5) / gray.scaleX),
@@ -640,7 +634,7 @@ function refineProposal(
     height: pageBottom - pageTop,
     coordinateSpace: space,
   });
-  const quality = computeGeometryQuality(gray, boundingBox, space);
+  const quality = computeGeometryQuality(gray, boundingBox);
   // A balloon interior is separated from its surroundings by ink or tone;
   // flat regions must not be promoted even if they are uniformly bright.
   if (quality.boundaryContrast < 6 || quality.score < minimumQuality) {

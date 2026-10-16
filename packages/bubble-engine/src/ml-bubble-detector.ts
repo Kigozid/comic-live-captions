@@ -34,6 +34,13 @@ export const COMIC_BUBBLE_CLASSES = [
 ] as const;
 export type ComicBubbleClass = (typeof COMIC_BUBBLE_CLASSES)[number];
 
+/**
+ * Labels from the trained comic speech-bubble detector
+ * (`comic-speech-bubble-detector`). `text_bubble` is a balloon region;
+ * `text_free` is free-floating text without a balloon and must not be proposed.
+ */
+export const BUBBLE_DETECTOR_CLASSES = ['text_bubble', 'text_free'] as const;
+
 /** Raw model detection before space mapping. Coordinates are pixel-edge. */
 export interface YoloDetection {
   readonly x1: number;
@@ -441,11 +448,13 @@ function isBubbleClass(
     ''
   ).toLowerCase();
   if (!label) return true;
+  // Trained bubble detector: keep balloons, drop free text.
+  if (label === 'text_bubble' || label === 'speech') return true;
+  if (label === 'text_free' || label === 'text') return false;
   // Drop obvious non-bubble labels from comic datasets.
   const nonBubble = [
     'panel',
     'frame',
-    'text',
     'sfx',
     'caption',
     'title',

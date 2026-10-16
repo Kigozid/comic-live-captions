@@ -8,13 +8,18 @@
 
 import type {
   OCRDocument,
-  OCRWord,
-  OCRLine,
-  OCRBlock,
   ImageSpace,
-  Polygon,
   Bounds,
 } from '@comic-captioner/shared';
+import {
+  buildTimelineFromAlignedWords,
+  timelineCuesFromDialogueEvents,
+  type TimelineCaptionAssignment,
+} from '../../../packages/caption-engine/src/timeline-mapping.js';
+import type {
+  DialogueEvent,
+  CaptionLayout,
+} from '@comic-captioner/core';
 import {
   detectTextRegionsForInpaint,
   inpaintTextRegions,
@@ -62,7 +67,7 @@ import {
   type CtcFramePosteriorsProvider,
   type ForcedAlignAcousticResult,
 } from '../../../packages/audio-engine/src/wav2vec2-alignment.js';
-import type { WordTimestamp } from '@comic-captioner/core';
+import type { Transcript, WordTimestamp } from '@comic-captioner/core';
 import type {
   BubbleId,
   PageId,
@@ -114,6 +119,38 @@ export function autoCleanPage(
   };
 }
 
+/**
+ * True when the project has an original page but no cleaned page yet, so
+ * auto-inpaint should synthesize one. Hand-imported cleaned pages skip this.
+ */
+export function needsAutoClean(pagePair: {
+  readonly original?: unknown;
+  readonly cleaned?: unknown;
+}): boolean {
+  return Boolean(pagePair.original) && !pagePair.cleaned;
+}
+
+/**
+ * Human-readable confidence label that reflects hybrid provenance instead of
+ * always saying "heuristic".
+ */
+export function describeBubbleConfidence(input: {
+  readonly confidence?: number;
+  readonly detectionSources?: readonly string[];
+}): string {
+  if (input.confidence === undefined) return 'manual region';
+  const percent = `${Math.round(input.confidence * 100)}%`;
+  const sources = input.detectionSources ?? [];
+  const hasMl = sources.includes('ml');
+  const hasHeuristic = sources.includes('heuristic');
+  const hasDetected = sources.includes('detected');
+  if (hasMl && (hasHeuristic || hasDetected)) return `${percent} hybrid`;
+  if (hasMl) return `${percent} ML`;
+  if (hasHeuristic && hasDetected) return `${percent} hybrid`;
+  if (hasHeuristic) return `${percent} heuristic`;
+  return `${percent} detected`;
+}
+
 export type BubbleProposalSource =
   | { readonly kind: 'heuristic' }
   | { readonly kind: 'synthetic-ml' }
@@ -128,6 +165,51 @@ export interface HybridDetectResult {
   readonly result: HybridBubbleDetectionResult;
   readonly source: 'api' | 'local';
   readonly provider: string | null;
+}
+
+/**
+ * API detect-bubbles returns flattened bubble fields + sources/support/quality.
+ * Normalize to the nested `HybridBubble` shape (`bubble` + provenance).
+ */
+function normalizeApiHybridBubble(raw: unknown): HybridBubble {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  if (record.bubble && typeof record.bubble === 'object') {
+    return record as unknown as HybridBubble;
+  }
+  const polygon = record.polygon as HybridBubble['bubble']['polygon'];
+  const contour =
+    (record.contour as HybridBubble['bubble']['contour'] | undefined) ??
+    polygon;
+  const bubble = {
+    id: String(record.id ?? ''),
+    kind: (record.kind ?? 'unknown') as HybridBubble['bubble']['kind'],
+    shape: (record.shape ?? 'unknown') as HybridBubble['bubble']['shape'],
+    contour,
+    polygon,
+    confidence: Number(record.confidence ?? 0),
+    ...(record.classificationConfidence !== undefined
+      ? {
+          classificationConfidence: Number(record.classificationConfidence),
+        }
+      : {}),
+    tail: (record.tail ?? null) as HybridBubble['bubble']['tail'],
+  };
+  const quality = (record.quality ?? {
+    areaRatio: 0,
+    fillRatio: 0,
+    interiorLuminance: 0,
+    boundaryContrast: 0,
+    edgeContactRatio: 0,
+    score: 0,
+  }) as HybridBubble['quality'];
+  return {
+    bubble: bubble as HybridBubble['bubble'],
+    sources: ((record.sources as string[] | undefined) ?? [
+      'detected',
+    ]) as HybridBubble['sources'],
+    support: (record.support ?? []) as HybridBubble['support'],
+    quality,
+  };
 }
 
 /**
@@ -163,23 +245,29 @@ export async function detectBubblesHybrid(
       });
       if (response.ok) {
         const payload = (await response.json()) as {
-          bubbles: readonly HybridBubble[];
+          bubbles: readonly unknown[];
           detection: {
             mode: string;
             provider: string | null;
             proposalCount?: number;
+            deterministicCount?: number;
+            mergedCount?: number;
+            refinedCount?: number;
+            rejectedCount?: number;
           };
         };
+        const bubbles = payload.bubbles.map(normalizeApiHybridBubble);
         return {
-          bubbles: payload.bubbles,
+          bubbles,
           result: {
-            bubbles: payload.bubbles,
+            bubbles,
             coordinateSpace: space,
-            deterministicCount: payload.bubbles.length,
+            deterministicCount:
+              payload.detection.deterministicCount ?? bubbles.length,
             proposalCount: payload.detection.proposalCount ?? 0,
-            mergedCount: 0,
-            refinedCount: 0,
-            rejectedCount: 0,
+            mergedCount: payload.detection.mergedCount ?? 0,
+            refinedCount: payload.detection.refinedCount ?? 0,
+            rejectedCount: payload.detection.rejectedCount ?? 0,
             providerName: payload.detection.provider,
           },
           source: 'api',
@@ -463,8 +551,11 @@ export interface AcousticAlignInput {
     readonly end: number;
     readonly speakerId?: string | null;
   }[];
-  readonly pcm: Float32Array;
+  /** Decoded mono PCM. Required for the local provider path. */
+  readonly pcm?: Float32Array;
   readonly sampleRateHz: number;
+  /** Compressed audio bytes; the API decodes these with FFmpeg. */
+  readonly audioBytes?: Uint8Array;
   readonly timebaseId: AudioTimebaseId;
   /**
    * Optional custom wav2vec2/CTC backend. When omitted, this function calls
@@ -494,31 +585,39 @@ export interface AcousticAlignResult {
 export async function refineWordTimesAcoustic(
   input: AcousticAlignInput,
 ): Promise<AcousticAlignResult> {
+  const segmentPayload = input.segments.map((segment) => ({
+    ...(segment.id ? { id: segment.id } : {}),
+    text: segment.text,
+    start: segment.start,
+    end: segment.end,
+    ...(segment.speakerId !== undefined
+      ? { speakerId: segment.speakerId }
+      : {}),
+  }));
+
   // 1) Server-side wav2vec2 (real ONNX weights).
   if (!input.provider && !input.offline) {
     try {
-      const pcmBuffer = input.pcm.buffer.slice(
-        input.pcm.byteOffset,
-        input.pcm.byteOffset + input.pcm.byteLength,
-      );
-      const pcmBase64 = bufferToBase64(new Uint8Array(pcmBuffer));
+      const body: Record<string, unknown> = {
+        sampleRateHz: input.sampleRateHz,
+        timebaseId: input.timebaseId,
+        segments: segmentPayload,
+      };
+      if (input.audioBytes && input.audioBytes.length > 0) {
+        body.audio = bufferToBase64(input.audioBytes);
+      } else if (input.pcm && input.pcm.length > 0) {
+        const pcmBuffer = input.pcm.buffer.slice(
+          input.pcm.byteOffset,
+          input.pcm.byteOffset + input.pcm.byteLength,
+        );
+        body.pcm = bufferToBase64(new Uint8Array(pcmBuffer));
+      } else {
+        throw new Error('acoustic alignment needs pcm or audioBytes');
+      }
       const response = await fetch('/api/align-words', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          pcm: pcmBase64,
-          sampleRateHz: input.sampleRateHz,
-          timebaseId: input.timebaseId,
-          segments: input.segments.map((segment) => ({
-            ...(segment.id ? { id: segment.id } : {}),
-            text: segment.text,
-            start: segment.start,
-            end: segment.end,
-            ...(segment.speakerId !== undefined
-              ? { speakerId: segment.speakerId }
-              : {}),
-          })),
-        }),
+        body: JSON.stringify(body),
       });
       if (response.ok) {
         const payload = (await response.json()) as {
@@ -540,7 +639,12 @@ export async function refineWordTimesAcoustic(
     }
   }
 
-  // 2) Injected provider or synthetic fallback.
+  // 2) Injected provider or synthetic fallback (needs decoded PCM).
+  if (!input.pcm || input.pcm.length === 0) {
+    throw new Error(
+      'Local acoustic alignment requires decoded PCM; provide pcm or use the API path.',
+    );
+  }
   const provider = input.provider ?? new SyntheticCtcPosteriorsProvider();
   const result: ForcedAlignAcousticResult = await alignWordsAcoustic({
     segments: input.segments.map((segment) => ({
@@ -576,6 +680,100 @@ export async function refineWordTimesAcoustic(
   };
 }
 
+export interface TranscriptRefineResult {
+  readonly transcript: Transcript;
+  readonly alignment: AcousticAlignResult | null;
+  readonly message?: string;
+}
+
+/**
+ * Replace transcript segment word timings with CTC Viterbi acoustic alignment.
+ * Segment text and ids stay user-editable; only `words` (and segment interval
+ * bounds when refined) change. On API/provider failure the original transcript
+ * is returned unchanged so the review path is never blocked.
+ */
+export async function refineTranscriptWordTimes(
+  transcript: Transcript,
+  options: {
+    readonly audioBytes?: Uint8Array;
+    readonly pcm?: Float32Array;
+    readonly sampleRateHz?: number;
+    readonly provider?: CtcFramePosteriorsProvider;
+    readonly offline?: boolean;
+  } = {},
+): Promise<TranscriptRefineResult> {
+  const segments = transcript.segments.filter(
+    (segment) => segment.text.trim().length > 0,
+  );
+  if (segments.length === 0) {
+    return {
+      transcript,
+      alignment: null,
+      message: 'No transcript segments to align.',
+    };
+  }
+  try {
+    const alignment = await refineWordTimesAcoustic({
+      segments: segments.map((segment) => ({
+        id: segment.id,
+        text: segment.text,
+        start: segment.interval.start.value,
+        end: segment.interval.end.value,
+        speakerId: segment.speakerId,
+      })),
+      timebaseId: transcript.timebase.id as AudioTimebaseId,
+      sampleRateHz: options.sampleRateHz ?? 16_000,
+      ...(options.audioBytes ? { audioBytes: options.audioBytes } : {}),
+      ...(options.pcm ? { pcm: options.pcm } : {}),
+      ...(options.provider ? { provider: options.provider } : {}),
+      ...(options.offline !== undefined ? { offline: options.offline } : {}),
+    });
+
+    const bySegment = new Map<string, WordTimestamp[]>();
+    for (const word of alignment.words) {
+      const match = /^acoustic:(.+):word-\d+$/u.exec(word.id);
+      const segmentId = match?.[1];
+      if (!segmentId) continue;
+      const list = bySegment.get(segmentId);
+      if (list) list.push(word);
+      else bySegment.set(segmentId, [word]);
+    }
+
+    const refinedSegments = transcript.segments.map((segment) => {
+      const refinedWords = bySegment.get(segment.id);
+      if (!refinedWords || refinedWords.length === 0) return segment;
+      const first = refinedWords[0]!;
+      const last = refinedWords[refinedWords.length - 1]!;
+      return Object.freeze({
+        ...segment,
+        interval: Object.freeze({
+          start: first.start,
+          end: last.end,
+        }),
+        words: Object.freeze(refinedWords),
+      });
+    });
+
+    return {
+      transcript: Object.freeze({
+        ...transcript,
+        segments: Object.freeze(refinedSegments),
+        revision: transcript.revision + 1,
+      }),
+      alignment,
+    };
+  } catch (cause) {
+    return {
+      transcript,
+      alignment: null,
+      message:
+        cause instanceof Error
+          ? cause.message
+          : 'Acoustic word alignment failed.',
+    };
+  }
+}
+
 function bufferToBase64(bytes: Uint8Array): string {
   if (typeof btoa === 'function') {
     let binary = '';
@@ -589,4 +787,45 @@ function bufferToBase64(bytes: Uint8Array): string {
   }
   // Node / vitest
   return Buffer.from(bytes).toString('base64');
+}
+
+export interface TimelineFromAlignedTranscriptResult {
+  readonly events: readonly DialogueEvent[];
+  readonly cues: readonly {
+    readonly id: string;
+    readonly bubbleId: string;
+    readonly start: number;
+    readonly end: number;
+    readonly confidence: number;
+  }[];
+}
+
+/**
+ * Wire acoustically aligned / transcript words onto the caption timeline.
+ *
+ * This is a pure mapping stage after ASR + optional `/api/align-words`
+ * refinement. It never re-transcribes audio. Assignments bind caption units
+ * to bubbles + layouts; unassigned units stay off the timeline for review.
+ */
+export function timelineFromAlignedTranscript(
+  transcript: {
+    readonly segments: readonly {
+      readonly id: string;
+      readonly words: readonly WordTimestamp[];
+    }[];
+  },
+  assignment:
+    | {
+        readonly bubbleId: BubbleId;
+        readonly layout: CaptionLayout;
+        readonly confidence?: number;
+      }
+    | readonly TimelineCaptionAssignment[],
+): TimelineFromAlignedTranscriptResult {
+  const words = transcript.segments.flatMap((segment) => segment.words);
+  const { events } = buildTimelineFromAlignedWords(words, assignment);
+  return {
+    events,
+    cues: timelineCuesFromDialogueEvents(events),
+  };
 }

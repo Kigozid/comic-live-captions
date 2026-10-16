@@ -100,7 +100,8 @@ describe('local project persistence', () => {
       assets: [],
       alignment: null,
     });
-    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.pages).toEqual([]);
     expect(migrated).toMatchObject({
       bubbles: [],
       textRegions: [],

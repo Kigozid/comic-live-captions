@@ -355,7 +355,7 @@ export interface ExportJobResult {
   readonly codec: 'h264';
 }
 
-const MAX_EXPORT_FRAMES = 30 * 60 * 30; // 30 minutes at 30 fps
+
 const DEFAULT_EXPORT_FPS = 24;
 
 /**
@@ -389,10 +389,6 @@ export async function runExportJob(
   }
   const resolution = body.resolution ?? { resolution: '720p' as const };
   const { width, height } = resolveExportDimensions(resolution);
-  const frameCount = Math.max(
-    1,
-    Math.min(MAX_EXPORT_FRAMES, Math.round(body.durationSeconds * fps)),
-  );
 
   const captions = body.captions as readonly ExportCaption[];
   const bubbles = body.bubbles as readonly ExportBubble[];

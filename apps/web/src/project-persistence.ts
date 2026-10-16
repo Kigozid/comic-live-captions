@@ -1,4 +1,4 @@
-export const PROJECT_SCHEMA_VERSION = 2;
+export const PROJECT_SCHEMA_VERSION = 3;
 const DATABASE_NAME = 'comic-captioner-projects';
 const DATABASE_VERSION = 1;
 
@@ -9,6 +9,31 @@ export interface ProjectAssetRef {
   readonly mediaType: string;
   readonly sizeBytes: number;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /** Set for page assets; omitted for project-global audio. */
+  readonly pageId?: string;
+}
+
+/** One comic page in a multi-page project (schema v3). */
+export interface ProjectPageRecord {
+  readonly id: string;
+  readonly label: string;
+  readonly originalHash?: string;
+  readonly cleanedHash?: string;
+  readonly editor?: unknown;
+  readonly panels?: readonly {
+    readonly id: string;
+    readonly bounds: {
+      readonly x: number;
+      readonly y: number;
+      readonly width: number;
+      readonly height: number;
+    };
+    readonly label?: string;
+  }[];
+  readonly pacingOverride?: {
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+  };
 }
 
 export interface ProjectSnapshot {
@@ -20,6 +45,8 @@ export interface ProjectSnapshot {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly assets: readonly ProjectAssetRef[];
+  /** Reading-order page list. Empty on legacy projects until migrated. */
+  readonly pages: readonly ProjectPageRecord[];
   readonly alignment: unknown | null;
   readonly bubbles: readonly unknown[];
   readonly textRegions: readonly unknown[];
@@ -179,6 +206,7 @@ export class ProjectService {
       createdAt: now,
       updatedAt: now,
       assets: [],
+      pages: [],
       alignment: null,
       bubbles: [],
       textRegions: [],
@@ -330,6 +358,40 @@ export function migrateProject(value: unknown): ProjectSnapshot {
       renderSettings: project.renderSettings ?? {},
       editor: project.editor ?? null,
     };
+  if (project.schemaVersion === 2) {
+    // v3 adds an explicit page list. Legacy single-page assets become page 1.
+    const assets = Array.isArray(project.assets)
+      ? (project.assets as ProjectAssetRef[])
+      : [];
+    const original = assets.find((asset) => asset.role === 'original');
+    const cleaned = assets.find((asset) => asset.role === 'cleaned');
+    const pageId = original?.pageId ?? cleaned?.pageId ?? crypto.randomUUID();
+    project = {
+      ...project,
+      schemaVersion: 3,
+      pages:
+        original || cleaned
+          ? [
+              {
+                id: pageId,
+                label: 'Page 1',
+                ...(original && typeof original.hash === 'string'
+                  ? { originalHash: original.hash }
+                  : {}),
+                ...(cleaned && typeof cleaned.hash === 'string'
+                  ? { cleanedHash: cleaned.hash }
+                  : {}),
+                editor: project.editor ?? null,
+              },
+            ]
+          : [],
+      assets: assets.map((asset) =>
+        asset.role === 'audio'
+          ? asset
+          : { ...asset, pageId: asset.pageId ?? pageId },
+      ),
+    };
+  }
   if (project.schemaVersion !== PROJECT_SCHEMA_VERSION)
     throw new Error(
       `Unsupported project schema version: ${String(project.schemaVersion)}.`,
@@ -382,7 +444,8 @@ function validateProject(value: ProjectSnapshot): void {
     !value.id ||
     typeof value.name !== 'string' ||
     !value.name.trim() ||
-    !Array.isArray(value.assets)
+    !Array.isArray(value.assets) ||
+    !Array.isArray(value.pages)
   )
     throw new Error('Project metadata is invalid.');
   if (!Number.isSafeInteger(value.revision) || value.revision < 0)
@@ -405,6 +468,24 @@ function validateProject(value: ProjectSnapshot): void {
       !['original', 'cleaned', 'audio'].includes(asset.role)
     )
       throw new Error('Project asset reference is invalid.');
+  for (const page of value.pages) {
+    if (!isObject(page) || typeof page.id !== 'string' || !page.id.trim())
+      throw new Error('Project page id is invalid.');
+    if (typeof page.label !== 'string' || !page.label.trim())
+      throw new Error('Project page label is invalid.');
+    const originalHash = (page as { originalHash?: unknown }).originalHash;
+    const cleanedHash = (page as { cleanedHash?: unknown }).cleanedHash;
+    if (
+      originalHash != null &&
+      (typeof originalHash !== 'string' || !/^[a-f\d]{64}$/i.test(originalHash))
+    )
+      throw new Error('Project page originalHash is invalid.');
+    if (
+      cleanedHash != null &&
+      (typeof cleanedHash !== 'string' || !/^[a-f\d]{64}$/i.test(cleanedHash))
+    )
+      throw new Error('Project page cleanedHash is invalid.');
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

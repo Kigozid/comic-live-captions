@@ -175,6 +175,64 @@ export class MockTranscriptionProvider implements TranscriptionProvider {
   }
 }
 
+export interface OfflineTranscriptionProviderOptions {
+  /** Placeholder dialogue tokens; default is a short demo phrase. */
+  readonly words?: readonly string[];
+  readonly speakerLabel?: string;
+}
+
+/**
+ * Offline transcript stub for demos and tests when no ASR (Gemini) is
+ * configured. Produces deterministic word timestamps spanning the audio so
+ * mapping, fitting, and export can run without a cloud provider.
+ *
+ * Never invents real dialogue — text is clearly placeholder and the
+ * transcript provenance is `offline-stub`.
+ */
+export class OfflineTranscriptionProvider implements TranscriptionProvider {
+  readonly providerId = 'offline-stub';
+  readonly providerVersion = '1';
+  readonly #options: OfflineTranscriptionProviderOptions;
+
+  constructor(options: OfflineTranscriptionProviderOptions = {}) {
+    this.#options = options;
+  }
+
+  async transcribe(input: TranscriptionInput): Promise<unknown> {
+    const duration = input.asset.durationSeconds;
+    const tokens = (
+      this.#options.words ?? ['Demo', 'dialogue', 'for', 'offline', 'export.']
+    ).map((token) => token.trim()).filter(Boolean);
+    if (tokens.length === 0) tokens.push('Demo');
+    const speakerId = 'spk_offline';
+    // Spread tokens evenly across the audio, leaving a small head/tail margin.
+    const margin = Math.min(0.15, duration * 0.05);
+    const usable = Math.max(0.05, duration - margin * 2);
+    const slot = usable / tokens.length;
+    const words = tokens.map((text, index) => {
+      const start = margin + index * slot;
+      const end = Math.min(duration, start + slot * 0.9);
+      return {
+        text,
+        startSeconds: Number(start.toFixed(4)),
+        endSeconds: Number(Math.max(start + 0.01, end).toFixed(4)),
+        speakerId,
+      };
+    });
+    return {
+      text: tokens.join(' '),
+      words,
+      speakers: [
+        {
+          id: speakerId,
+          label: this.#options.speakerLabel ?? 'Offline demo speaker',
+        },
+      ],
+      inputHash: input.asset.sha256,
+    } satisfies ProviderTranscriptOutput;
+  }
+}
+
 function validateAndBuildTranscript(
   value: unknown,
   asset: AudioAssetMetadata,
