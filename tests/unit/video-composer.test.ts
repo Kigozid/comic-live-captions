@@ -351,7 +351,7 @@ describe('export payload converters', () => {
     });
     expect(props.pages[0]?.bubbles[0]?.id).toBe('bubble-1');
     expect(props.cues).toEqual([]);
-    expect(props.captionStyle.revealMode).toBe('phrase');
+    expect(props.captionStyle.revealMode).toBe('word-by-word');
     expect(props.camera.enabled).toBe(false);
   });
 });

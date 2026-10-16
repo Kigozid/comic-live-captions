@@ -1,4 +1,5 @@
 import type {
+  BubbleReusePolicy,
   CameraMotionSettings,
   CaptionStyleSettings,
   FallbackCaptionPlacement,
@@ -17,11 +18,12 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyleSettings = Object.freeze({
   strokeWidthPx: 2,
   lineSpacingPx: 6,
   safeMarginPx: 8,
-  revealMode: 'phrase' as const,
+  revealMode: 'word-by-word' as const,
   karaoke: false,
   wordEmphasis: false,
   fadeInSeconds: 0.12,
   fadeOutSeconds: 0.18,
+  bubbleReusePolicy: 'replace' as BubbleReusePolicy,
 });
 
 export const DEFAULT_CAMERA: CameraMotionSettings = Object.freeze({

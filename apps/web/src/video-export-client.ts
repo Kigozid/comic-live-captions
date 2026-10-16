@@ -33,7 +33,8 @@ export interface VideoExportAvailability {
   readonly jobs: readonly VideoExportJobSummary[];
 }
 
-export type CaptionRevealMode = 'phrase' | 'word-by-word';
+export type CaptionRevealMode = 'phrase' | 'word-by-word' | 'character-by-character';
+export type BubbleReusePolicy = 'retain' | 'replace' | 'clear';
 
 export interface VideoExportStyleOptions {
   readonly fontFamily: string;
@@ -46,6 +47,7 @@ export interface VideoExportStyleOptions {
   readonly revealMode: CaptionRevealMode;
   readonly karaoke: boolean;
   readonly wordEmphasis: boolean;
+  readonly bubbleReusePolicy: BubbleReusePolicy;
   readonly fadeInSeconds: number;
   readonly fadeOutSeconds: number;
 }

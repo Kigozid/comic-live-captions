@@ -398,3 +398,5 @@ export interface Project {
   readonly audioAssets: readonly AudioAssetRef[];
   readonly proposals: readonly AnalysisProposal<unknown>[];
 }
+
+export * from './caption-reveal.js';

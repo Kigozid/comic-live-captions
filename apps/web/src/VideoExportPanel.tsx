@@ -79,9 +79,11 @@ export function VideoExportPanel({
   const [sequenceMode, setSequenceMode] =
     useState<SequenceMode>('panel-sequence');
   const [revealMode, setRevealMode] =
-    useState<VideoExportStyleOptions['revealMode']>('phrase');
+    useState<VideoExportStyleOptions['revealMode']>('word-by-word');
   const [karaoke, setKaraoke] = useState(false);
   const [wordEmphasis, setWordEmphasis] = useState(false);
+  const [bubbleReusePolicy, setBubbleReusePolicy] =
+    useState<VideoExportStyleOptions['bubbleReusePolicy']>('replace');
   const [fontFamily, setFontFamily] = useState(
     DEFAULT_CAPTION_STYLE.fontFamily,
   );
@@ -107,8 +109,16 @@ export function VideoExportPanel({
       revealMode,
       karaoke,
       wordEmphasis,
+      bubbleReusePolicy,
     }),
-    [fontFamily, fontSizePx, revealMode, karaoke, wordEmphasis],
+    [
+      fontFamily,
+      fontSizePx,
+      revealMode,
+      karaoke,
+      wordEmphasis,
+      bubbleReusePolicy,
+    ],
   );
 
   const resolvedSize = useMemo(() => {
@@ -451,6 +461,25 @@ export function VideoExportPanel({
         >
           <option value="phrase">Captions · phrase</option>
           <option value="word-by-word">Captions · word-by-word</option>
+          <option value="character-by-character">
+            Captions · typewriter (per character)
+          </option>
+        </select>
+        <select
+          aria-label="Bubble reuse policy"
+          className="editor-input"
+          disabled={disabled || busy}
+          value={bubbleReusePolicy}
+          onChange={(event) =>
+            setBubbleReusePolicy(
+              event.currentTarget
+                .value as VideoExportStyleOptions['bubbleReusePolicy'],
+            )
+          }
+        >
+          <option value="replace">Reuse · replace</option>
+          <option value="retain">Reuse · retain</option>
+          <option value="clear">Reuse · clear</option>
         </select>
         <select
           aria-label="Caption font family"

@@ -6,6 +6,13 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from 'remotion';
+import {
+  activeCaptionsAt,
+  assignTokenSpans,
+  captionRevealAt,
+  type CaptionRevealState,
+  type RevealToken,
+} from '@comic-captioner/core';
 import type {
   CaptionCue,
   FittedCaptionLayout,
@@ -13,14 +20,9 @@ import type {
   ImageRect,
   MotionComicVideoProps,
   PageInput,
-  WordTiming,
+  RevealMode,
 } from '../types.js';
-import {
-  activeWordAt,
-  isCueVisibleAt,
-  mapWordsToLines,
-  visibleWordsAt,
-} from '../timing.js';
+import { mapWordsToLines, type LineWordSpan } from '../timing.js';
 import {
   bubbleSafeRect,
   pageAtTime,
@@ -186,40 +188,51 @@ function resolveCuePlacement(
   };
 }
 
+/**
+ * Entrance-only fade. Completed captions persist at full opacity (no exit fade)
+ * so a spoken line stays readable until its bubble is reused per the policy.
+ */
 function captionOpacity(
   cue: CaptionCue,
   timeSeconds: number,
   props: MotionComicVideoProps,
 ): number {
   const fadeIn = props.captionStyle.fadeInSeconds;
-  const fadeOut = props.captionStyle.fadeOutSeconds;
-  const entrance =
-    fadeIn <= 0
-      ? 1
-      : interpolate(
-          timeSeconds,
-          [cue.startSeconds, cue.startSeconds + fadeIn],
-          [0, 1],
-          { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' },
-        );
-  const exit =
-    fadeOut <= 0
-      ? 1
-      : interpolate(
-          timeSeconds,
-          [cue.endSeconds - fadeOut, cue.endSeconds],
-          [1, 0],
-          { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' },
-        );
-  return Math.min(entrance, exit);
+  if (fadeIn <= 0) return 1;
+  return interpolate(
+    timeSeconds,
+    [cue.startSeconds, cue.startSeconds + fadeIn],
+    [0, 1],
+    { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' },
+  );
+}
+
+/**
+ * Even, word-aligned token timing for captions that arrived without acoustic
+ * word timestamps. Marked `estimated` so diagnostics can distinguish them from
+ * real forced-alignment timings.
+ */
+function synthesizeTokens(
+  text: string,
+  startSeconds: number,
+  endSeconds: number,
+): RevealToken[] {
+  const parts = splitWords(text);
+  const span = Math.max(0, endSeconds - startSeconds);
+  const slice = span / Math.max(1, parts.length);
+  return parts.map((word, index) => ({
+    text: word,
+    startSeconds: startSeconds + index * slice,
+    endSeconds: startSeconds + (index + 1) * slice,
+    estimated: true,
+  }));
 }
 
 const CaptionWords: React.FC<{
   readonly line: FittedCaptionLine;
-  readonly words: readonly WordTiming[];
-  readonly lineWords: readonly string[];
-  readonly timeSeconds: number;
-  readonly revealMode: MotionComicVideoProps['captionStyle']['revealMode'];
+  readonly spans: readonly LineWordSpan[];
+  readonly reveal: CaptionRevealState;
+  readonly mode: RevealMode;
   readonly karaoke: boolean;
   readonly wordEmphasis: boolean;
   readonly fontFamily: string;
@@ -230,10 +243,9 @@ const CaptionWords: React.FC<{
   readonly opacity: number;
 }> = ({
   line,
-  words,
-  lineWords,
-  timeSeconds,
-  revealMode,
+  spans,
+  reveal,
+  mode,
   karaoke,
   wordEmphasis,
   fontFamily,
@@ -243,8 +255,7 @@ const CaptionWords: React.FC<{
   strokeWidthPx,
   opacity,
 }) => {
-  const visible = visibleWordsAt(words, timeSeconds);
-  const active = activeWordAt(words, timeSeconds);
+  const charMode = mode === 'character-by-character';
   return (
     <div
       style={{
@@ -264,26 +275,28 @@ const CaptionWords: React.FC<{
         paintOrder: 'stroke fill',
       }}
     >
-      {lineWords.map((word, index) => {
-        const isSpoken =
-          revealMode === 'phrase' ||
-          words.length === 0 ||
-          visible.some((item) => item.text === word);
-        const isActive = karaoke && active?.text === word;
+      {spans.map((span) => {
+        const state = reveal.tokens[span.wordIndex];
+        if (!state) return null;
+        const isActive = karaoke && state.active;
         const emphasisScale = wordEmphasis && isActive ? 1.08 : 1;
+        // Word/phrase modes keep full word width reserved (stable layout) and
+        // toggle visibility; character mode grows the visible substring.
+        const content = charMode ? state.text : span.text;
+        const shown = charMode ? state.text.length > 0 : state.revealed;
         return (
           <span
-            key={`${word}-${index}`}
+            key={`${span.wordIndex}`}
             style={{
               display: 'inline-block',
               marginRight: fontSizePx * 0.28,
-              opacity: isSpoken ? 1 : 0,
+              opacity: shown ? 1 : 0,
               color: isActive ? '#7c3aed' : undefined,
               transform: `scale(${emphasisScale})`,
               transformOrigin: 'left center',
             }}
           >
-            {word}
+            {content}
           </span>
         );
       })}
@@ -301,60 +314,46 @@ const CueLayer: React.FC<{
   const opacity = captionOpacity(cue, timeSeconds, props);
   if (opacity <= 0.001) return null;
   const style = props.captionStyle;
-  const words = cue.words ?? [];
+
+  // One token stream for the whole caption drives both reveal and line mapping.
+  const timedTokens: readonly RevealToken[] =
+    cue.words.length > 0
+      ? cue.words.map((word) => ({
+          text: word.text,
+          startSeconds: word.startSeconds,
+          endSeconds: word.endSeconds,
+        }))
+      : synthesizeTokens(cue.text, cue.startSeconds, cue.endSeconds);
+  const tokens = assignTokenSpans(cue.text, timedTokens);
+
+  const reveal = captionRevealAt(tokens, timeSeconds, {
+    mode: style.revealMode,
+    sourceText: cue.text,
+  });
   const spans =
-    placement.layout && words.length > 0
-      ? mapWordsToLines(
-          placement.lines.map((line) => line.text),
-          words,
-        )
+    tokens.length > 0
+      ? mapWordsToLines(placement.lines.map((line) => line.text), tokens)
       : [];
 
   return (
     <>
-      {placement.lines.map((line, lineIndex) => {
-        const lineWords = splitWords(line.text);
-        const lineSpans = spans.filter((span) => span.lineIndex === lineIndex);
-        // Prefer timed words mapped to this line; otherwise treat tokens as untimed.
-        const timedWords: WordTiming[] =
-          lineSpans.length > 0
-            ? lineSpans.map((span) => ({
-                text: span.text,
-                startSeconds: span.startSeconds,
-                endSeconds: span.endSeconds,
-              }))
-            : lineWords.map((word, index) => {
-                // Distribute cue timing evenly across tokens when word times
-                // were not provided for this line.
-                const span = Math.max(0, cue.endSeconds - cue.startSeconds);
-                const slice = span / Math.max(1, lineWords.length);
-                return {
-                  text: word,
-                  startSeconds: cue.startSeconds + index * slice,
-                  endSeconds: cue.startSeconds + (index + 1) * slice,
-                };
-              });
-        return (
-          <CaptionWords
-            key={`${cue.id}-${lineIndex}`}
-            line={line}
-            words={timedWords}
-            lineWords={lineWords}
-            timeSeconds={timeSeconds}
-            revealMode={style.revealMode}
-            karaoke={style.karaoke}
-            wordEmphasis={style.wordEmphasis}
-            fontFamily={placement.layout?.fontFamily ?? style.fontFamily}
-            fontSizePx={placement.layout?.fontSizePx ?? style.fontSizePx}
-            color={placement.layout?.color ?? style.color}
-            strokeColor={placement.layout?.strokeColor ?? style.strokeColor}
-            strokeWidthPx={
-              placement.layout?.strokeWidthPx ?? style.strokeWidthPx
-            }
-            opacity={opacity}
-          />
-        );
-      })}
+      {placement.lines.map((line, lineIndex) => (
+        <CaptionWords
+          key={`${cue.id}-${lineIndex}`}
+          line={line}
+          spans={spans.filter((span) => span.lineIndex === lineIndex)}
+          reveal={reveal}
+          mode={style.revealMode}
+          karaoke={style.karaoke}
+          wordEmphasis={style.wordEmphasis}
+          fontFamily={placement.layout?.fontFamily ?? style.fontFamily}
+          fontSizePx={placement.layout?.fontSizePx ?? style.fontSizePx}
+          color={placement.layout?.color ?? style.color}
+          strokeColor={placement.layout?.strokeColor ?? style.strokeColor}
+          strokeWidthPx={placement.layout?.strokeWidthPx ?? style.strokeWidthPx}
+          opacity={opacity}
+        />
+      ))}
     </>
   );
 };
@@ -425,9 +424,13 @@ export const MotionComicVideo: React.FC<MotionComicVideoProps> = (props) => {
     ? resolvePageCameraPlacement(page, props.width, props.height)
     : null;
   const cameraStyle = getCameraTransform(props, timeSeconds);
+  // Persistence + inactive-empty + bubble reuse, all from the shared selector.
   const activeCues = useMemo(
-    () => props.cues.filter((cue) => isCueVisibleAt(cue, timeSeconds)),
-    [props.cues, timeSeconds],
+    () =>
+      activeCaptionsAt(props.cues, timeSeconds, {
+        reusePolicy: props.captionStyle.bubbleReusePolicy,
+      }),
+    [props.cues, timeSeconds, props.captionStyle.bubbleReusePolicy],
   );
 
   return (

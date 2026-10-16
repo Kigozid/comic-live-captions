@@ -11,9 +11,14 @@ import type { ExportValidationReport, FrameExportInput } from './validation.js';
 export {
   captionMotionAtTime,
   renderCaptionLayerSvg,
+  renderTimedCaptionLayerSvg,
   renderDebugLayerSvg,
 } from './svg.js';
-export type { RenderDebugOverlay } from './svg.js';
+export type {
+  RenderDebugOverlay,
+  TimedCaptionLayout,
+  TimedCaptionRenderOptions,
+} from './svg.js';
 export { ExportValidationError, validateFrameExport };
 export type {
   ExportBubble,

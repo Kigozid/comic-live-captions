@@ -6,10 +6,11 @@
  * always expressed in page/image pixels and scaled to the output frame.
  */
 
-export type RevealMode = 'phrase' | 'word-by-word';
+export type RevealMode = 'phrase' | 'word-by-word' | 'character-by-character';
 export type CaptionAlignment = 'left' | 'center' | 'right';
 export type CameraMode = 'none' | 'slow-zoom-in' | 'slow-zoom-out' | 'pan';
 export type TransitionKind = 'none' | 'fade' | 'crossfade';
+export type BubbleReusePolicy = 'retain' | 'replace' | 'clear';
 
 export interface ImagePoint {
   readonly x: number;
@@ -121,6 +122,8 @@ export interface CaptionStyleSettings {
   readonly wordEmphasis: boolean;
   readonly fadeInSeconds: number;
   readonly fadeOutSeconds: number;
+  /** What a bubble shows when a later caption reuses it. */
+  readonly bubbleReusePolicy: BubbleReusePolicy;
   /** Manual wrap width in image px; omitted means fit to bubble safe region. */
   readonly maxLineWidthPx?: number;
 }
