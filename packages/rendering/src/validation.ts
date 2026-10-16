@@ -18,6 +18,10 @@ export interface ExportCaption {
   readonly mappingConfidence: number | null;
   readonly mapped: boolean;
   readonly confidence: number | null;
+  /** Acoustic word timings when available (from forced alignment). */
+  readonly words?:
+    | readonly { readonly text: string; readonly start: number; readonly end: number }[]
+    | undefined;
 }
 export interface ExportBubble {
   readonly id: BubbleId;

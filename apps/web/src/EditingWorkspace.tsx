@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { SourceImageMetadata } from '@comic-captioner/shared';
 import { createImageSpace } from '@comic-captioner/shared';
 import type { DialogueMapping } from '@comic-captioner/core';
+import { captionRevealAt, synthesizeRevealTokens } from '@comic-captioner/core';
 import type { ClockSnapshot, Transcript } from '@comic-captioner/audio-engine';
 import { emptyEditorHistory, editorReducer } from './editor-model.js';
 import type { EditorDocument } from './editor-model.js';
@@ -294,6 +295,7 @@ export function EditingWorkspace({
   const [bubbleEditError, setBubbleEditError] = useState<string | null>(null);
   const [showDetection, setShowDetection] = useState(true);
   const [canvasMode, setCanvasMode] = useState<'select' | 'bubble'>('select');
+  const [liveCaptions, setLiveCaptions] = useState(false);
   const [selectedDialogueId, setSelectedDialogueId] = useState<string | null>(
     null,
   );
@@ -895,6 +897,20 @@ export function EditingWorkspace({
         }
       : null;
 
+  const previewTime = audioClock?.positionSeconds ?? 0;
+  const activeDialogue = Object.values(document.dialogues).find(
+    (dialogue) => previewTime >= dialogue.start && previewTime < dialogue.end,
+  );
+  const activeWord = activeDialogue
+    ? (() => {
+        const words = activeDialogue.caption.split(/\s+/).filter(Boolean);
+        const span = Math.max(0, activeDialogue.end - activeDialogue.start);
+        const slice = span / Math.max(1, words.length);
+        const index = Math.floor((previewTime - activeDialogue.start) / slice);
+        return words[Math.min(words.length - 1, Math.max(0, index))] ?? null;
+      })()
+    : null;
+
   return (
     <main className="comic-editor-workspace comic-canvas-stage">
       <div className="comic-canvas-toolbar" role="toolbar" aria-label="Canvas tools">
@@ -923,6 +939,15 @@ export function EditingWorkspace({
           type="button"
         >
           {showDetection ? 'Hide detections' : 'Show detections'}
+        </button>
+        <button
+          className="canvas-mode-button"
+          aria-pressed={liveCaptions}
+          onClick={() => setLiveCaptions((on) => !on)}
+          type="button"
+          title="Preview live word-by-word captions synced to the audio clock"
+        >
+          {liveCaptions ? 'Live captions: on' : 'Live captions: off'}
         </button>
         <button
           className="canvas-mode-button"
@@ -1252,7 +1277,31 @@ export function EditingWorkspace({
                     </g>
                   );
                 })}
-              {Object.values(document.dialogues).map((dialogue) => (
+              {Object.values(document.dialogues).map((dialogue) => {
+                const words = dialogue.caption.split(/\s+/).filter(Boolean);
+                const segment = transcript?.segments.find(
+                  (item) => item.id === dialogue.id,
+                );
+                const realWords = segment?.words.map((word) => ({
+                  text: word.text,
+                  startSeconds: word.start.value,
+                  endSeconds: word.end.value,
+                }));
+                const tokens =
+                  realWords && realWords.length === words.length
+                    ? realWords
+                    : synthesizeRevealTokens(
+                        dialogue.caption,
+                        dialogue.start,
+                        dialogue.end,
+                      );
+                const reveal = liveCaptions
+                  ? captionRevealAt(tokens, previewTime, {
+                      mode: 'word-by-word',
+                    })
+                  : null;
+                if (liveCaptions && !reveal?.started) return null;
+                return (
                 <g key={dialogue.id}>
                   {dialogue.id === selectedDialogueId && (
                     <rect
@@ -1296,11 +1345,26 @@ export function EditingWorkspace({
                       setDragEnd(start);
                     }}
                   >
-                    {dialogue.caption}
+                    {liveCaptions
+                      ? words.map((word, index) => {
+                          const state = reveal?.tokens[index];
+                          return (
+                            <tspan
+                              key={index}
+                              fillOpacity={state?.revealed ? 1 : 0}
+                              fill={state?.active ? '#7c3aed' : undefined}
+                            >
+                              {word}
+                              {index < words.length - 1 ? ' ' : ''}
+                            </tspan>
+                          );
+                        })
+                      : dialogue.caption}
                     <title>Drag to move caption · select to edit</title>
                   </text>
                 </g>
-              ))}
+                );
+              })}
               {rect && (
                 <rect
                   {...rect}
@@ -1312,6 +1376,13 @@ export function EditingWorkspace({
                 />
               )}
             </svg>
+            {liveCaptions && (
+              <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-1 font-mono text-xs text-white">
+                {`t=${previewTime.toFixed(2)}s · ${
+                  activeDialogue ? `bubble ${activeDialogue.bubbleId}` : '—'
+                } · ${activeWord ? `word \"${activeWord}\"` : '—'}`}
+              </div>
+            )}
           </div>
         </section>
         <WorkspaceInspectorPortal>

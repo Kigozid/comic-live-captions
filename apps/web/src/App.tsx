@@ -2276,6 +2276,13 @@ export function App() {
           ) ?? null,
         start: dialogue.start,
         end: dialogue.end,
+        words: savedTranscript?.segments
+          .find((segment) => segment.id === id)
+          ?.words.map((word) => ({
+            text: word.text,
+            start: word.start.value,
+            end: word.end.value,
+          })),
         mapped:
           Boolean(document.bubbles[dialogue.bubbleId]) &&
           (mapping?.bubbleId === undefined ||
@@ -2350,6 +2357,13 @@ export function App() {
           ) ?? null,
         start: dialogue.start,
         end: dialogue.end,
+        words: savedTranscript?.segments
+          .find((segment) => segment.id === id)
+          ?.words.map((word) => ({
+            text: word.text,
+            start: word.start.value,
+            end: word.end.value,
+          })),
         mapped:
           Boolean(document.bubbles[dialogue.bubbleId]) &&
           (mapping?.bubbleId === undefined ||
