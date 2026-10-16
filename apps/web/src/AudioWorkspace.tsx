@@ -31,6 +31,7 @@ export function AudioWorkspace({
   onClockChange,
   seekRequest,
   onAudioControls,
+  bare = false,
 }: {
   readonly onTranscriptChange?: (transcript: Transcript | null) => void;
   readonly onAudioAsset?: (asset: {
@@ -45,6 +46,8 @@ export function AudioWorkspace({
     readonly revision: number;
   } | null;
   readonly onAudioControls?: (controls: AudioPlaybackControls | null) => void;
+  /** Engine-only mount: no chrome, just playback controls via onAudioControls. */
+  readonly bare?: boolean;
 }) {
   const [engine, setEngine] = useState<AudioEngine | null>(null);
   const [assetResult, setAssetResult] = useState<AudioImportResult | null>(
@@ -344,6 +347,20 @@ export function AudioWorkspace({
     : [];
 
   return (
+    <>
+      {bare ? (
+        <input
+          accept="audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/ogg,audio/webm,.mp3,.wav,.m4a,.aac,.ogg,.webm"
+          className="ui-sr"
+          onChange={(event) => {
+            void importFile(event.currentTarget.files?.[0]);
+            event.currentTarget.value = '';
+          }}
+          ref={inputRef}
+          type="file"
+          data-testid="audio-bare-import"
+        />
+      ) : (
     <section
       className="mt-5 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm sm:p-6"
       aria-label="Audio workspace"
@@ -689,6 +706,8 @@ export function AudioWorkspace({
         </p>
       )}
     </section>
+      )}
+    </>
   );
 }
 

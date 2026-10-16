@@ -389,6 +389,7 @@
 /* Canvas bar — mirrors IMG.LY `ly.img.canvas.bar` (bottom). */
 .canvas-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 8px;
@@ -398,6 +399,40 @@
   border-radius: 12px;
   background: var(--ui-surface);
   box-shadow: var(--ui-shadow);
+}
+
+.canvas-bar-spacer {
+  flex: 1 1 12px;
+  min-width: 8px;
+}
+
+.playback-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.playback-time {
+  min-width: 88px;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.playback-scrubber {
+  width: min(180px, 22vw);
+  accent-color: var(--ui-accent);
+}
+
+.live-transcript {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--ui-accent);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Left tool drawer — IMG.LY asset/panel dock. */

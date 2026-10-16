@@ -507,6 +507,7 @@ export function App() {
     status: 'empty',
   });
   const audioControlsRef = useRef<AudioPlaybackControls | null>(null);
+  const [playbackLoop, setPlaybackLoop] = useState(false);
   const [seekRequest, setSeekRequest] = useState<{
     readonly time: number;
     readonly revision: number;
@@ -621,6 +622,27 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = editorTheme;
   }, [editorTheme]);
+
+  // Loop narration when playback reaches the end.
+  useEffect(() => {
+    if (!playbackLoop) return;
+    if (audioClock.status !== 'playing') return;
+    const duration =
+      audioClock.durationSeconds ||
+      Number(audioSource?.metadata.durationSeconds ?? 0);
+    if (duration <= 0) return;
+    if (audioClock.positionSeconds < duration - 0.05) return;
+    setSeekRequest((previous) => ({
+      time: 0,
+      revision: (previous?.revision ?? 0) + 1,
+    }));
+  }, [
+    playbackLoop,
+    audioClock.status,
+    audioClock.positionSeconds,
+    audioClock.durationSeconds,
+    audioSource,
+  ]);
   const projectImportRef = useRef<HTMLInputElement>(null);
   const pageImportInputRef = useRef<HTMLInputElement>(null);
   const [pair, setPair] = useState<ImagePair>(emptyPair);
@@ -2972,6 +2994,22 @@ export function App() {
       data-inspector={inspectorOpen ? 'on' : 'off'}
       data-timeline={timelineCollapsed ? 'collapsed' : 'expanded'}
     >
+      {/* Headless audio engine: drives playback, import, and transcription. */}
+      <AudioWorkspace
+        bare
+        onAudioControls={(controls) => {
+          audioControlsRef.current = controls;
+        }}
+        onAudioAsset={(asset) => {
+          setAudioSource({
+            metadata: asset.metadata as unknown as Record<string, unknown>,
+            blob: asset.blob,
+          });
+        }}
+        onClockChange={setAudioClock}
+        onTranscriptChange={(transcript) => setSavedTranscript(transcript)}
+        seekRequest={seekRequest}
+      />
       <header className="editor-toolbar">
         <div className="editor-toolbar-left">
           <button
@@ -3255,6 +3293,129 @@ export function App() {
           >
             Page settings
           </button>
+          <div className="canvas-bar-spacer" />
+          <div className="playback-bar" role="toolbar" aria-label="Playback">
+            <button
+              className="ui-btn icon"
+              type="button"
+              title="Go to beginning · Home"
+              aria-label="Go to beginning"
+              onClick={() =>
+                setSeekRequest((previous) => ({
+                  time: 0,
+                  revision: (previous?.revision ?? 0) + 1,
+                }))
+              }
+            >
+              |◀
+            </button>
+            <button
+              className="ui-btn icon"
+              type="button"
+              title="Back 1s"
+              aria-label="Back 1 second"
+              onClick={() =>
+                setSeekRequest((previous) => ({
+                  time: Math.max(0, (audioClock.positionSeconds ?? 0) - 1),
+                  revision: (previous?.revision ?? 0) + 1,
+                }))
+              }
+            >
+              ‹
+            </button>
+            <button
+              className="ui-btn icon primary"
+              type="button"
+              title="Play or pause · Space"
+              aria-label={audioClock.status === 'playing' ? 'Pause playback' : 'Play playback'}
+              disabled={!audioSource?.blob}
+              onClick={() => void audioControlsRef.current?.toggle()}
+            >
+              {audioClock.status === 'playing' ? '❚❚' : '▶'}
+            </button>
+            <button
+              className="ui-btn icon"
+              type="button"
+              title="Forward 1s"
+              aria-label="Forward 1 second"
+              onClick={() =>
+                setSeekRequest((previous) => ({
+                  time: Math.min(
+                    audioClock.durationSeconds || 0,
+                    (audioClock.positionSeconds ?? 0) + 1,
+                  ),
+                  revision: (previous?.revision ?? 0) + 1,
+                }))
+              }
+            >
+              ›
+            </button>
+            <button
+              className="ui-btn icon"
+              type="button"
+              title="Go to end · End"
+              aria-label="Go to end"
+              onClick={() =>
+                setSeekRequest((previous) => ({
+                  time: audioClock.durationSeconds || 0,
+                  revision: (previous?.revision ?? 0) + 1,
+                }))
+              }
+            >
+              ▶|
+            </button>
+            <span className="playback-time" aria-live="off">
+              {formatPlaybackTime(audioClock.positionSeconds)} /{' '}
+              {formatPlaybackTime(
+                audioClock.durationSeconds ||
+                  Number(audioSource?.metadata.durationSeconds ?? 0),
+              )}
+            </span>
+            <input
+              aria-label="Playback position"
+              className="playback-scrubber"
+              type="range"
+              min={0}
+              max={audioClock.durationSeconds || Number(audioSource?.metadata.durationSeconds ?? 0) || 1}
+              step={0.01}
+              value={Math.min(
+                audioClock.positionSeconds,
+                audioClock.durationSeconds ||
+                  Number(audioSource?.metadata.durationSeconds ?? 0) ||
+                  0,
+              )}
+              disabled={!audioSource?.blob}
+              onChange={(event) =>
+                setSeekRequest((previous) => ({
+                  time: Number(event.currentTarget.value),
+                  revision: (previous?.revision ?? 0) + 1,
+                }))
+              }
+            />
+            <button
+              className={`ui-btn icon ${playbackLoop ? 'active' : ''}`}
+              type="button"
+              title="Loop playback"
+              aria-label="Loop playback"
+              aria-pressed={playbackLoop}
+              onClick={() => setPlaybackLoop((value) => !value)}
+            >
+              ↻
+            </button>
+            <button
+              className="ui-btn"
+              type="button"
+              title="Import narration audio"
+              onClick={() => audioControlsRef.current?.import()}
+            >
+              {audioSource ? 'Replace audio' : 'Import audio'}
+            </button>
+          </div>
+          {activeTranscriptSegment?.text ? (
+            <span className="live-transcript" aria-live="polite">
+              {activeTranscriptSegment.text}
+            </span>
+          ) : null}
         </div>
         {/* IMG.LY-style workspace: tool drawer + canvas. No legacy card stack. */}
         {projectMessage && (
@@ -3526,32 +3687,234 @@ export function App() {
             )}
             {activeTool === 'captions' && (
               <ToolDrawerSection title="Captions">
-                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={!savedTranscript || !editorDocument}
+                    onClick={() => {
+                      window.dispatchEvent(
+                        new CustomEvent('comic-editor-suggest-matches'),
+                      );
+                      setProjectMessage(
+                        'Dialogue match suggestions requested. Review them on the canvas.',
+                      );
+                    }}
+                  >
+                    Suggest dialogue matches
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow stacked>
+                  {reviewDialogues.length === 0 ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      No captions yet. Detect bubbles and map transcript lines.
+                    </p>
+                  ) : (
+                    reviewDialogues.map((dialogue, index) => (
+                      <button
+                        key={dialogue.id}
+                        type="button"
+                        className={`page-chip ${timelineSelection?.kind === 'caption' && timelineSelection.id === dialogue.id ? 'selected' : ''}`}
+                        onClick={() => {
+                          setTimelineSelection({
+                            kind: 'caption',
+                            id: dialogue.id,
+                          });
+                          window.dispatchEvent(
+                            new CustomEvent('comic-editor-selection', {
+                              detail: {
+                                kind: 'caption',
+                                bubbleId: dialogue.bubbleId,
+                                dialogueId: dialogue.id,
+                                bubble: null,
+                                caption: {
+                                  id: dialogue.id,
+                                  text: dialogue.caption,
+                                  startSeconds: dialogue.start,
+                                  endSeconds: dialogue.end,
+                                  fontFamily: dialogue.fontFamily,
+                                  fontSizePx: dialogue.fontSizePx,
+                                },
+                              },
+                            }),
+                          );
+                          setSeekRequest((previous) => ({
+                            time: dialogue.start,
+                            revision: (previous?.revision ?? 0) + 1,
+                          }));
+                        }}
+                      >
+                        {index + 1}. {dialogue.caption.slice(0, 28) || 'Untitled'}
+                        <span style={{ opacity: 0.7 }}>
+                          {' '}
+                          · {dialogue.start.toFixed(1)}–{dialogue.end.toFixed(1)}s
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </ToolDrawerRow>
+                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
                   Select a bubble or caption on the canvas to edit text and timing.
                 </p>
               </ToolDrawerSection>
             )}
             {activeTool === 'bubbles' && (
               <ToolDrawerSection title="Bubbles">
-                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
-                  Detected speech bubbles appear on the canvas. Select one to edit bounds and class.
+                <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
+                    onClick={() => void detectBubbles()}
+                  >
+                    {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow stacked>
+                  {Object.values(editorDocument?.bubbles ?? {}).length === 0 ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      No bubbles yet. Run Detect bubbles on the OCR tool.
+                    </p>
+                  ) : (
+                    Object.values(editorDocument?.bubbles ?? {}).map(
+                      (bubble, index) => {
+                        const dialogue =
+                          editorDocument?.dialogues[`dialogue:${bubble.id}`];
+                        return (
+                          <button
+                            key={bubble.id}
+                            type="button"
+                            className="page-chip"
+                            onClick={() => {
+                              window.dispatchEvent(
+                                new CustomEvent('comic-editor-selection', {
+                                  detail: {
+                                    kind: 'bubble',
+                                    bubbleId: bubble.id,
+                                    dialogueId: `dialogue:${bubble.id}`,
+                                    bubble: {
+                                      id: bubble.id,
+                                      kind: bubble.kind,
+                                      confidence: bubble.confidence ?? null,
+                                      boundingBox: bubble.boundingBox,
+                                    },
+                                    caption: dialogue
+                                      ? {
+                                          id: dialogue.id,
+                                          text: dialogue.caption,
+                                          startSeconds: dialogue.start,
+                                          endSeconds: dialogue.end,
+                                          fontFamily: dialogue.fontFamily,
+                                          fontSizePx: dialogue.fontSizePx,
+                                        }
+                                      : null,
+                                  },
+                                }),
+                              );
+                            }}
+                          >
+                            {index + 1}. {bubble.kind} ·{' '}
+                            {Math.round((bubble.confidence ?? 0) * 100)}%
+                          </button>
+                        );
+                      },
+                    )
+                  )}
+                </ToolDrawerRow>
+                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
+                  Select one to edit bounds and class in the inspector.
                 </p>
               </ToolDrawerSection>
             )}
             {activeTool === 'audio' && (
               <ToolDrawerSection title="Narration">
                 <ToolDrawerRow>
+                  <button
+                    className="ui-btn"
+                    type="button"
+                    onClick={() => audioControlsRef.current?.import()}
+                  >
+                    {audioSource ? 'Replace audio' : 'Import audio'}
+                  </button>
+                  <button
+                    className="ui-btn primary"
+                    type="button"
+                    disabled={!audioSource?.blob}
+                    onClick={() => void audioControlsRef.current?.toggle()}
+                  >
+                    {audioClock.status === 'playing' ? 'Pause' : 'Play'}
+                  </button>
+                </ToolDrawerRow>
+                <ToolDrawerRow>
                   <span className="inspector-label">
                     {String(audioSource?.metadata.filename ?? 'No audio loaded')}
                   </span>
                 </ToolDrawerRow>
                 {audioSource ? (
-                  <ToolDrawerRow>
-                    <span className="inspector-label">
-                      {Number(audioSource.metadata.durationSeconds ?? 0).toFixed(2)}s
-                    </span>
-                  </ToolDrawerRow>
-                ) : null}
+                  <>
+                    <ToolDrawerRow>
+                      <span className="inspector-label">
+                        {Number(audioSource.metadata.durationSeconds ?? 0).toFixed(2)}s
+                        {savedTranscript ? ' · transcript ready' : ' · no transcript'}
+                      </span>
+                    </ToolDrawerRow>
+                    <ToolDrawerRow stacked>
+                      <input
+                        aria-label="Audio position"
+                        className="playback-scrubber"
+                        type="range"
+                        min={0}
+                        max={
+                          audioClock.durationSeconds ||
+                          Number(audioSource.metadata.durationSeconds ?? 0) ||
+                          1
+                        }
+                        step={0.01}
+                        value={Math.min(
+                          audioClock.positionSeconds,
+                          audioClock.durationSeconds ||
+                            Number(audioSource.metadata.durationSeconds ?? 0) ||
+                            0,
+                        )}
+                        onChange={(event) =>
+                          setSeekRequest((previous) => ({
+                            time: Number(event.currentTarget.value),
+                            revision: (previous?.revision ?? 0) + 1,
+                          }))
+                        }
+                      />
+                      <button
+                        className="ui-btn"
+                        type="button"
+                        disabled={speechAutomationBusy}
+                        onClick={() => {
+                          void audioControlsRef.current?.transcribe().then((result) => {
+                            if (result) setSavedTranscript(result);
+                          });
+                        }}
+                      >
+                        Generate transcript
+                      </button>
+                      {activeTranscriptSegment?.text ? (
+                        <p
+                          aria-live="polite"
+                          style={{
+                            fontSize: 11,
+                            color: 'var(--ui-accent)',
+                            margin: 0,
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          {activeTranscriptSegment.text}
+                        </p>
+                      ) : null}
+                    </ToolDrawerRow>
+                  </>
+                ) : (
+                  <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                    Import narration audio to enable playback and transcription.
+                  </p>
+                )}
               </ToolDrawerSection>
             )}
             {activeTool === 'export' && (
@@ -4163,4 +4526,11 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatPlaybackTime(seconds: number): string {
+  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const minutes = Math.floor(safe / 60);
+  const rest = safe - minutes * 60;
+  return `${minutes}:${rest.toFixed(1).padStart(4, '0')}`;
 }

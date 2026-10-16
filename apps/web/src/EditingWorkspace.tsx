@@ -757,6 +757,15 @@ export function EditingWorkspace({
     );
   }
 
+  // Shell tool drawer can request dialogue match suggestions.
+  useEffect(() => {
+    const onSuggest = () => proposeTranscriptMappings();
+    window.addEventListener('comic-editor-suggest-matches', onSuggest);
+    return () =>
+      window.removeEventListener('comic-editor-suggest-matches', onSuggest);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [document, transcript, readingOrder]);
+
   function approveMapping(mapping: DialogueMapping) {
     if (!document || !transcript || !mapping.bubbleId) return;
     const segment = transcript.segments.find(
