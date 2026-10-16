@@ -649,7 +649,6 @@ export function App() {
   const [sourceUrls, setSourceUrls] = useState<
     Partial<Record<SourceImageRole, string>>
   >({});
-  const [opacity, setOpacity] = useState(0.5);
   const [busyRole, setBusyRole] = useState<SourceImageRole | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [alignment, setAlignment] = useState<AlignmentResult | null>(null);

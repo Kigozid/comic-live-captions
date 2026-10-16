@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import type { BubbleId } from '@comic-captioner/shared';
+import { createImageSpace } from '@comic-captioner/shared';
 import {
   buildMultiPageExportPlan,
   createPageWorkspace,
@@ -21,6 +23,7 @@ function pageWithImage(
   label: string,
   dialogues: { start: number; end: number }[] = [],
 ) {
+  const imageSpace = createImageSpace(`space-${id}`, 100, 150);
   const workspace = {
     ...createPageWorkspace(label, id),
     original: {
@@ -35,11 +38,7 @@ function pageWithImage(
     },
     originalBlob: blobOf(id),
     editor: {
-      imageSpace: {
-        id: `space-${id}`,
-        kind: 'image' as const,
-        dimensions: { width: 100, height: 150 },
-      },
+      imageSpace,
       bubbles: {
         [`b-${id}`]: {
           id: `b-${id}`,
@@ -49,89 +48,42 @@ function pageWithImage(
             y: 10,
             width: 40,
             height: 30,
-            coordinateSpace: {
-              id: `space-${id}`,
-              kind: 'image' as const,
-              dimensions: { width: 100, height: 150 },
-            },
+            coordinateSpace: imageSpace,
           },
           polygon: {
             points: [
-              {
-                x: 10,
-                y: 10,
-                coordinateSpace: {
-                  id: `space-${id}`,
-                  kind: 'image' as const,
-                  dimensions: { width: 100, height: 150 },
-                },
-              },
-              {
-                x: 50,
-                y: 10,
-                coordinateSpace: {
-                  id: `space-${id}`,
-                  kind: 'image' as const,
-                  dimensions: { width: 100, height: 150 },
-                },
-              },
-              {
-                x: 50,
-                y: 40,
-                coordinateSpace: {
-                  id: `space-${id}`,
-                  kind: 'image' as const,
-                  dimensions: { width: 100, height: 150 },
-                },
-              },
-              {
-                x: 10,
-                y: 40,
-                coordinateSpace: {
-                  id: `space-${id}`,
-                  kind: 'image' as const,
-                  dimensions: { width: 100, height: 150 },
-                },
-              },
+              { x: 10, y: 10, coordinateSpace: imageSpace },
+              { x: 50, y: 10, coordinateSpace: imageSpace },
+              { x: 50, y: 40, coordinateSpace: imageSpace },
+              { x: 10, y: 40, coordinateSpace: imageSpace },
             ],
-            coordinateSpace: {
-              id: `space-${id}`,
-              kind: 'image' as const,
-              dimensions: { width: 100, height: 150 },
-            },
+            coordinateSpace: imageSpace,
           },
-          confidence: 1,
+          reviewStatus: 'accepted' as const,
+          confidence: 0.9,
         },
       },
-      observations: {},
       dialogues: Object.fromEntries(
         dialogues.map((dialogue, index) => [
           `d-${id}-${index}`,
           {
             id: `d-${id}-${index}`,
-            bubbleId: `b-${id}`,
-            caption: `Line ${index}`,
+            bubbleId: `b-${id}` as BubbleId,
+            caption: `Line ${index + 1}`,
             start: dialogue.start,
             end: dialogue.end,
-            fontFamily: 'Arial',
-            fontSizePx: 12,
+            fontFamily: 'Helvetica',
+            fontSizePx: 18,
             lineSpacingPx: 2,
             paddingPx: 4,
-            position: {
-              x: 0,
-              y: 0,
-              coordinateSpace: {
-                id: `space-${id}`,
-                kind: 'image' as const,
-                dimensions: { width: 100, height: 150 },
-              },
-            },
-            speakerId: 's',
+            position: { x: 30, y: 25, coordinateSpace: imageSpace },
+            speakerId: 's1',
             contextNote: '',
           },
         ]),
       ),
       order: dialogues.map((_, index) => `d-${id}-${index}`),
+      observations: {},
     },
   };
   return workspace;
