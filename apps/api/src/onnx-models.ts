@@ -1,6 +1,6 @@
 import { access, readFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { constants as fsConstants, existsSync } from 'node:fs';
+import { isAbsolute, join, resolve, dirname } from 'node:path';
 import { BUBBLE_DETECTOR_CLASSES } from '@comic-captioner/bubble-engine';
 
 /**
@@ -27,7 +27,45 @@ export class OnnxModelError extends Error {
   }
 }
 
-const DEFAULT_MODELS_DIR = resolve(process.cwd(), 'models');
+/**
+ * Walk up from the process cwd to the pnpm workspace root and anchor the
+ * default `models/` directory there. `pnpm dev` runs the API with cwd
+ * `apps/api/`, while `pnpm models:fetch` downloads weights into the
+ * repo-root `models/` — anchoring on cwd silently disables both models in
+ * the real dev workflow. Falls back to cwd when no workspace root is found.
+ */
+function findWorkspaceRoot(startDir: string): string {
+  let dir = resolve(startDir);
+  for (;;) {
+    try {
+      if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return dir;
+    } catch {
+      // keep walking
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return resolve(startDir);
+    dir = parent;
+  }
+}
+
+const WORKSPACE_ROOT = findWorkspaceRoot(process.cwd());
+const DEFAULT_MODELS_DIR = resolve(WORKSPACE_ROOT, 'models');
+
+/**
+ * ONNX Runtime execution providers from COMIC_ONNX_EXECUTION_PROVIDERS
+ * (comma-separated, e.g. `cuda,cpu` or `coreml,cpu`). Defaults to `cpu`;
+ * a `cpu` fallback is always appended so configured accelerators degrade
+ * gracefully instead of failing model load.
+ */
+function resolveExecutionProviders(): string[] {
+  const raw = process.env.COMIC_ONNX_EXECUTION_PROVIDERS;
+  const configured = (raw ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const providers = configured.length > 0 ? configured : ['cpu'];
+  return providers.includes('cpu') ? providers : [...providers, 'cpu'];
+}
 
 export interface OrtTensorLike {
   readonly data: Float32Array | Int32Array | BigInt64Array | Uint8Array;
@@ -67,7 +105,7 @@ async function loadOrt(): Promise<{
 }
 
 async function assertModelFile(path: string): Promise<string> {
-  const modelPath = isAbsolute(path) ? path : resolve(process.cwd(), path);
+  const modelPath = isAbsolute(path) ? path : resolve(WORKSPACE_ROOT, path);
   try {
     await access(modelPath, fsConstants.R_OK);
     return modelPath;
@@ -127,7 +165,7 @@ export async function loadYoloOnnxSession(
   let session: OrtSessionLike;
   try {
     session = await ort.InferenceSession.create(modelPath, {
-      executionProviders: ['cpu'],
+      executionProviders: resolveExecutionProviders(),
     });
   } catch (cause) {
     throw new OnnxModelError(
@@ -266,13 +304,50 @@ function decodeYolov10Detections(
 // ---------------------------------------------------------------------------
 
 /** wav2vec2-base-960h CTC vocabulary (Xenova / Hugging Face export). */
+/**
+ * wav2vec2-base-960h vocab in true model logit order (facebook/wav2vec2-base-960h
+ * vocab.json, also used by the Xenova ONNX exports). The order is
+ * frequency-based, NOT alphabetical — logit index N means this token, and a
+ * wrong table turns every decode into a substitution cipher (e.g. 'e'→'a')
+ * while word boundaries survive, which looks "almost right" but is gibberish.
+ */
 export const WAV2VEC2_BASE_VOCAB = [
   '<pad>',
   '<s>',
   '</s>',
   '<unk>',
   '|',
-  ...'abcdefghijklmnopqrstuvwxyz',
+  // 5..12
+  'e',
+  't',
+  'a',
+  'o',
+  'n',
+  'i',
+  'h',
+  's',
+  // 13..26
+  'r',
+  'd',
+  'l',
+  'u',
+  'm',
+  'w',
+  'c',
+  'f',
+  'g',
+  'y',
+  'p',
+  'b',
+  'v',
+  'k',
+  // 27
+  "'",
+  // 28..31
+  'x',
+  'j',
+  'q',
+  'z',
 ] as const;
 
 export interface LoadWav2vec2Options {
@@ -302,7 +377,7 @@ export async function loadWav2vec2CtcProvider(
   let session: OrtSessionLike;
   try {
     session = await ort.InferenceSession.create(modelPath, {
-      executionProviders: ['cpu'],
+      executionProviders: resolveExecutionProviders(),
     });
   } catch (cause) {
     throw new OnnxModelError(
