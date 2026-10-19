@@ -1380,7 +1380,7 @@ export function EditingWorkspace({
               <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-1 font-mono text-xs text-white">
                 {`t=${previewTime.toFixed(2)}s · ${
                   activeDialogue ? `bubble ${activeDialogue.bubbleId}` : '—'
-                } · ${activeWord ? `word \"${activeWord}\"` : '—'}`}
+                } · ${activeWord ? `word "${activeWord}"` : '—'}`}
               </div>
             )}
           </div>
