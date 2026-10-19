@@ -106,11 +106,16 @@ export class FasterWhisperHttpSession implements FasterWhisperSession {
     language?: string;
     signal?: AbortSignal;
   }): Promise<FasterWhisperSessionResult> {
-    const bytes = new Uint8Array(
-      input.pcm.buffer,
-      input.pcm.byteOffset,
-      input.pcm.byteLength,
-    );
+    // The service contract is signed 16-bit little-endian PCM. Sending the
+    // Float32Array's raw bytes labeled as s16le made the worker re-interpret
+    // float bit patterns as int16 samples — whisper then transcribed noise
+    // (random auto-detected languages, hallucinated text, bogus timings).
+    const s16 = new Int16Array(input.pcm.length);
+    for (let i = 0; i < input.pcm.length; i += 1) {
+      const v = Math.max(-1, Math.min(1, input.pcm[i]!));
+      s16[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    const bytes = new Uint8Array(s16.buffer, s16.byteOffset, s16.byteLength);
     let response: Response;
     try {
       response = await fetch(`${this.#baseUrl}/transcribe`, {
