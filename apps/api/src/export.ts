@@ -46,6 +46,21 @@ export interface FfmpegExportResult {
   readonly codec: 'h264';
 }
 
+export interface FfmpegStreamExportInput {
+  /** PNG/JPEG frame bytes in playback order, produced lazily. */
+  readonly frames: AsyncIterable<Uint8Array>;
+  /** Optional hard cap on streamed frames; the stream stops at the cap. */
+  readonly maxFrames?: number;
+  /** Optional audio bytes (wav/m4a/mp3) muxed into the output. */
+  readonly audio?: Uint8Array;
+  readonly fps: number;
+  readonly width: number;
+  readonly height: number;
+  readonly audioFileName?: string;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (done: number, total: number) => void;
+}
+
 export interface FfmpegAvailability {
   readonly available: boolean;
   readonly path: string | null;
@@ -77,15 +92,21 @@ export async function checkFfmpegAvailability(): Promise<FfmpegAvailability> {
 }
 
 /**
- * Encode a deterministic frame sequence into H.264 MP4, optionally muxing
- * audio. Faster than realtime and frame-exact — replaces browser captureStream.
+ * Stream frames straight into FFmpeg's stdin (`-f image2pipe`) and encode an
+ * H.264 MP4, optionally muxing audio. Faster than realtime and frame-exact —
+ * replaces browser captureStream.
+ *
+ * Frames are never materialized in RAM or on disk: at most a couple are in
+ * flight at once (stdin backpressure), so long exports stay flat in memory
+ * instead of accumulating every frame twice (RAM array + on-disk PNGs).
+ * Only the output MP4 and a single audio file touch disk.
  *
  * Never pretends to succeed: missing FFmpeg is a typed FFMPEG_MISSING error.
  */
-export async function exportMp4WithFfmpeg(
-  input: FfmpegExportInput,
+export async function exportMp4StreamingWithFfmpeg(
+  input: FfmpegStreamExportInput,
 ): Promise<FfmpegExportResult> {
-  validateInput(input);
+  validateStreamInput(input);
   if (input.signal?.aborted) {
     throw new FfmpegExportError('ABORTED', 'Export was cancelled.');
   }
@@ -99,11 +120,6 @@ export async function exportMp4WithFfmpeg(
 
   const workDir = await mkdtemp(join(tmpdir(), 'comic-captioner-export-'));
   try {
-    const framePattern = join(workDir, 'frame-%06d.png');
-    for (const [index, frame] of input.frames.entries()) {
-      await writeFile(join(workDir, `frame-${String(index).padStart(6, '0')}.png`), frame);
-    }
-
     const audioPath = input.audio
       ? join(workDir, input.audioFileName ?? 'audio.wav')
       : null;
@@ -117,10 +133,12 @@ export async function exportMp4WithFfmpeg(
       '-hide_banner',
       '-loglevel',
       'error',
+      '-f',
+      'image2pipe',
       '-framerate',
       String(input.fps),
       '-i',
-      framePattern,
+      '-',
       ...(audioPath ? ['-i', audioPath] : []),
       '-c:v',
       'libx264',
@@ -140,19 +158,43 @@ export async function exportMp4WithFfmpeg(
       outputPath,
     ];
 
-    await runFfmpeg(availability.path, args, input.signal);
+    const frameCount = await streamFramesToFfmpeg(availability.path, args, input);
     const bytes = await readFile(outputPath);
-    const durationSeconds = input.frames.length / input.fps;
     return Object.freeze({
       bytes,
-      durationSeconds,
-      frameCount: input.frames.length,
+      durationSeconds: frameCount / input.fps,
+      frameCount,
       fps: input.fps,
       codec: 'h264' as const,
     });
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * Encode a deterministic frame sequence into H.264 MP4, optionally muxing
+ * audio. Faster than realtime and frame-exact — replaces browser captureStream.
+ *
+ * Never pretends to succeed: missing FFmpeg is a typed FFMPEG_MISSING error.
+ */
+export async function exportMp4WithFfmpeg(
+  input: FfmpegExportInput,
+): Promise<FfmpegExportResult> {
+  validateInput(input);
+  const frames = input.frames;
+  return exportMp4StreamingWithFfmpeg({
+    frames: (async function* () {
+      for (const frame of frames) yield frame;
+    })(),
+    maxFrames: frames.length,
+    fps: input.fps,
+    width: input.width,
+    height: input.height,
+    ...(input.audio ? { audio: input.audio } : {}),
+    ...(input.audioFileName ? { audioFileName: input.audioFileName } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
 }
 
 /**
@@ -176,15 +218,26 @@ export async function exportVideoWithRenderedFrames(
       'frameCount must be an integer between 1 and 100000.',
     );
   }
-  const frames: Uint8Array[] = [];
-  for (let index = 0; index < input.frameCount; index += 1) {
-    if (input.signal?.aborted) {
-      throw new FfmpegExportError('ABORTED', 'Export was cancelled.');
-    }
-    frames.push(await input.renderFrame(index));
-    input.onProgress?.(index + 1, input.frameCount);
-  }
-  return exportMp4WithFfmpeg({ ...input, frames });
+  const frameCount = input.frameCount;
+  const renderFrame = input.renderFrame;
+  return exportMp4StreamingWithFfmpeg({
+    frames: (async function* () {
+      for (let index = 0; index < frameCount; index += 1) {
+        if (input.signal?.aborted) {
+          throw new FfmpegExportError('ABORTED', 'Export was cancelled.');
+        }
+        yield await renderFrame(index);
+      }
+    })(),
+    maxFrames: frameCount,
+    fps: input.fps,
+    width: input.width,
+    height: input.height,
+    ...(input.audio ? { audio: input.audio } : {}),
+    ...(input.audioFileName ? { audioFileName: input.audioFileName } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+  });
 }
 
 function validateInput(input: FfmpegExportInput): void {
@@ -194,6 +247,14 @@ function validateInput(input: FfmpegExportInput): void {
       'At least one frame is required for MP4 export.',
     );
   }
+  validateStreamInput(input);
+}
+
+function validateStreamInput(input: {
+  readonly fps: number;
+  readonly width: number;
+  readonly height: number;
+}): void {
   if (!Number.isFinite(input.fps) || input.fps <= 0 || input.fps > 240) {
     throw new FfmpegExportError(
       'INVALID_INPUT',
@@ -258,28 +319,49 @@ async function captureFfmpegVersion(ffmpegPath: string): Promise<string | null> 
   }
 }
 
-function runFfmpeg(
+/**
+ * Spawn FFmpeg and stream frames into its stdin with backpressure. Resolves
+ * with the number of frames written. Abort kills the child and rejects
+ * ABORTED; stdin stream errors are swallowed so the child's exit code
+ * reports the authoritative failure.
+ */
+function streamFramesToFfmpeg(
   ffmpegPath: string,
   args: readonly string[],
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
+  input: FfmpegStreamExportInput,
+): Promise<number> {
+  return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(ffmpegPath, [...args], {
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['pipe', 'ignore', 'pipe'],
     });
     let stderr = '';
-    const onAbort = () => {
-      child.kill('SIGTERM');
-      reject(new FfmpegExportError('ABORTED', 'Export was cancelled.'));
+    let frameCount = 0;
+    let settled = false;
+    const settleResolve = (count: number) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(count);
     };
-    signal?.addEventListener('abort', onAbort, { once: true });
+    const settleReject = (error: FfmpegExportError) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    };
+    // EPIPE surfaces when the child dies mid-stream; the close handler
+    // reports the real failure, so keep stdin errors from crashing the process.
+    child.stdin.on('error', () => undefined);
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+    const onAbort = () => {
+      child.kill('SIGTERM');
+      settleReject(new FfmpegExportError('ABORTED', 'Export was cancelled.'));
+    };
+    input.signal?.addEventListener('abort', onAbort, { once: true });
     child.on('error', (error) => {
-      signal?.removeEventListener('abort', onAbort);
+      input.signal?.removeEventListener('abort', onAbort);
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        reject(
+        settleReject(
           new FfmpegExportError(
             'FFMPEG_MISSING',
             `FFmpeg is not installed or not on PATH. ${INSTALL_HINT}`,
@@ -287,21 +369,53 @@ function runFfmpeg(
         );
         return;
       }
-      reject(
-        new FfmpegExportError('ENCODE_FAILED', error.message),
-      );
+      settleReject(new FfmpegExportError('ENCODE_FAILED', error.message));
     });
     child.on('close', (code) => {
-      signal?.removeEventListener('abort', onAbort);
-      if (code === 0) resolve();
+      input.signal?.removeEventListener('abort', onAbort);
+      if (settled) return;
+      if (code === 0) settleResolve(frameCount);
       else
-        reject(
+        settleReject(
           new FfmpegExportError(
             'ENCODE_FAILED',
             `FFmpeg exited with code ${code}: ${stderr.slice(0, 400)}`,
           ),
         );
     });
+
+    void (async () => {
+      const total = input.maxFrames ?? 0;
+      try {
+        for await (const frame of input.frames) {
+          if (input.signal?.aborted) {
+            child.kill('SIGTERM');
+            settleReject(new FfmpegExportError('ABORTED', 'Export was cancelled.'));
+            return;
+          }
+          if (input.maxFrames != null && frameCount >= input.maxFrames) break;
+          const drained = child.stdin.write(frame);
+          frameCount += 1;
+          input.onProgress?.(frameCount, total > 0 ? total : frameCount);
+          if (!drained) {
+            await new Promise<void>((resolveDrain) =>
+              child.stdin.once('drain', resolveDrain),
+            );
+          }
+        }
+        child.stdin.end();
+      } catch (error) {
+        child.kill('SIGTERM');
+        settleReject(
+          error instanceof FfmpegExportError
+            ? error
+            : new FfmpegExportError(
+                'ENCODE_FAILED',
+                error instanceof Error ? error.message : 'Frame rendering failed.',
+              ),
+        );
+      }
+    })();
   });
 }
 
@@ -393,37 +507,40 @@ export async function runExportJob(
   const captions = body.captions as readonly ExportCaption[];
   const bubbles = body.bubbles as readonly ExportBubble[];
 
-  const frames: Uint8Array[] = [];
-  try {
-    for await (const frame of renderFrameSequence(
-      {
-        pageImage,
-        captions,
-        bubbles,
-        width,
-        height,
-      },
-      fps,
-      body.durationSeconds,
-    )) {
-      if (signal?.aborted) {
-        throw new FfmpegExportError('ABORTED', 'Export was cancelled.');
+  // Frames stream straight from the renderer into FFmpeg's stdin; nothing is
+  // accumulated in RAM or on disk beyond the encoder's bounded write window.
+  const frames = (async function* () {
+    try {
+      for await (const frame of renderFrameSequence(
+        {
+          pageImage,
+          captions,
+          bubbles,
+          width,
+          height,
+        },
+        fps,
+        body.durationSeconds,
+      )) {
+        if (signal?.aborted) {
+          throw new FfmpegExportError('ABORTED', 'Export was cancelled.');
+        }
+        yield new Uint8Array(frame.png);
       }
-      frames.push(new Uint8Array(frame.png));
+    } catch (error) {
+      if (error instanceof ExportValidationError) {
+        throw new FfmpegExportError(
+          'INVALID_INPUT',
+          `Export validation failed: ${error.report.issues
+            .map((issue) => `${issue.captionId}: ${issue.code}`)
+            .join(', ')}`,
+        );
+      }
+      throw error;
     }
-  } catch (error) {
-    if (error instanceof ExportValidationError) {
-      throw new FfmpegExportError(
-        'INVALID_INPUT',
-        `Export validation failed: ${error.report.issues
-          .map((issue) => `${issue.captionId}: ${issue.code}`)
-          .join(', ')}`,
-      );
-    }
-    throw error;
-  }
+  })();
 
-  const result = await exportMp4WithFfmpeg({
+  const result = await exportMp4StreamingWithFfmpeg({
     frames,
     ...(audio ? { audio, audioFileName: `audio.${sanitizeAudioFormat(body.audioFormat)}` } : {}),
     fps,
