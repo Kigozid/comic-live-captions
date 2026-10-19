@@ -806,24 +806,42 @@ async function refineTranscriptWordTimes(
 
     const refinedSegments = transcript.segments.map((segment) => {
       const refinedWords = wordsBySegment.get(segment.id) ?? segment.words;
+      // Acoustic spans can overshoot the clip boundary (frame-grid rounding,
+      // ASR segments that run slightly long). Clamp into the asset duration and
+      // keep words monotonic and non-overlapping so the transcript validator's
+      // contract holds for the refined timings too.
+      const duration = Math.max(
+        0.01,
+        Number((transcript as { durationSeconds?: number }).durationSeconds) ||
+          Number((segment.interval.end as { value: number }).value) ||
+          0.01,
+      );
+      let previousEnd = 0;
       return {
         ...segment,
-        words: refinedWords.map((word, index) => ({
+        words: refinedWords.map((word, index) => {
+          let start = Math.max(0, Math.min(word.start.value, duration));
+          let end = Math.max(start + 0.01, Math.min(word.end.value, duration));
+          if (start < previousEnd) start = previousEnd;
+          if (end <= start) end = Math.min(duration, start + 0.01);
+          previousEnd = end;
+          return {
           id: segment.words[index]?.id ?? word.id,
           text: word.text,
           start: {
-            value: word.start.value,
+            value: start,
             timebase: asset.timebase.id,
             unit: 'seconds',
           },
           end: {
-            value: word.end.value,
+            value: end,
             timebase: asset.timebase.id,
             unit: 'seconds',
           },
           speakerId: segment.words[index]?.speakerId ?? word.speakerId,
           confidence: word.confidence,
-        })),
+          };
+        }),
       };
     });
 
