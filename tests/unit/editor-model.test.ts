@@ -556,4 +556,70 @@ describe('editing workspace document', () => {
     });
     expect(rejected.present?.dialogues['dialogue:nope']).toBeUndefined();
   });
+
+  it('batch-applies draft mappings to bubble dialogues with word timings', () => {
+    const space = createImageSpace('image:apply-map', 200, 100);
+    let state = editorReducer(emptyEditorHistory, {
+      type: 'initialize',
+      imageSpace: space,
+    });
+    state = editorReducer(state, {
+      type: 'import-analysis',
+      bubbles: [
+        {
+          id: 'map-a',
+          kind: 'speech',
+          confidence: 0.9,
+          points: [
+            { x: 10, y: 10 },
+            { x: 90, y: 10 },
+            { x: 90, y: 70 },
+            { x: 10, y: 70 },
+          ],
+        },
+        {
+          id: 'map-b',
+          kind: 'speech',
+          confidence: 0.9,
+          points: [
+            { x: 110, y: 10 },
+            { x: 190, y: 10 },
+            { x: 190, y: 70 },
+            { x: 110, y: 70 },
+          ],
+        },
+      ],
+    });
+    const applied = editorReducer(state, {
+      type: 'apply-mappings',
+      items: [
+        {
+          bubbleId: 'map-a',
+          caption: 'The city is under attack!',
+          start: 1,
+          end: 2,
+          words: [
+            { text: 'The', start: 1, end: 1.2 },
+            { text: 'city', start: 1.2, end: 2 },
+          ],
+        },
+        {
+          bubbleId: 'map-b',
+          caption: 'Hold the line!',
+          start: 3,
+          end: 4,
+        },
+      ],
+    });
+    const first = applied.present?.dialogues['dialogue:map-a'];
+    const second = applied.present?.dialogues['dialogue:map-b'];
+    expect(first?.caption).toBe('The city is under attack!');
+    expect(first?.start).toBe(1);
+    expect(first?.end).toBe(2);
+    expect(first?.words).toHaveLength(2);
+    expect(second?.caption).toBe('Hold the line!');
+    expect(second?.words).toBeUndefined();
+    // One history entry for the whole batch.
+    expect(applied.past).toHaveLength(state.past.length + 1);
+  });
 });

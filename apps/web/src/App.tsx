@@ -788,6 +788,12 @@ export function App() {
   const [speechProposals, setSpeechProposals] = useState<
     readonly SpeechAutomationMatch[] | null
   >(null);
+  const speechProposalsRef = useRef<readonly SpeechAutomationMatch[] | null>(
+    null,
+  );
+  useEffect(() => {
+    speechProposalsRef.current = speechProposals;
+  }, [speechProposals]);
   const [speechAutomationWarning, setSpeechAutomationWarning] = useState<
     string | null
   >(null);
@@ -1853,9 +1859,9 @@ export function App() {
     }
   }
 
-  async function automateSpeech() {
-    if (!pair.original && !pair.cleaned) return;
-    if (!sourceBlobs.original && !sourceBlobs.cleaned) return;
+  async function automateSpeech(): Promise<readonly SpeechAutomationMatch[]> {
+    if (!pair.original && !pair.cleaned) return [];
+    if (!sourceBlobs.original && !sourceBlobs.cleaned) return [];
     setSpeechAutomationBusy(true);
     setError(null);
     setSpeechProposals(null);
@@ -1897,18 +1903,113 @@ export function App() {
       });
       void refreshPageTextRegions();
       setSpeechProposals(result.matches);
+      speechProposalsRef.current = result.matches;
       setSpeechAutomationWarning(result.ocrWarning ?? null);
       setDismissedMappingIds([]);
       setMappingChoices({});
       setProjectMessage(
         `Speech automation found ${result.matches.length} dialogue turns. Review bubble matches and fitted captions below.`,
       );
+      return result.matches;
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : 'Speech automation failed.',
       );
+      return [];
     } finally {
       setSpeechAutomationBusy(false);
+    }
+  }
+
+  /**
+   * Draft-first dubbing: run the auto pipeline (if needed), accept every
+   * proposed mapping, then export a playable draft MP4. Corrections happen
+   * after playback via scrub-and-fix (reassign + word cues).
+   */
+  async function produceDraft() {
+    if ((!pair.original && !pair.cleaned) || !audioSource?.blob) {
+      setProjectMessage('Produce draft needs a comic page and an audio track.');
+      return;
+    }
+    try {
+      let matches = speechProposalsRef.current ?? [];
+      if (matches.length === 0) {
+        matches = await automateSpeech();
+      }
+      if (matches.length === 0) {
+        setProjectMessage(
+          'Draft mapping found no dialogue turns. Check transcription and bubbles, then retry.',
+        );
+        return;
+      }
+      const transcript = savedTranscript;
+      const items = matches.map((match) => {
+        const bubbleId =
+          mappingChoices[match.mapping.id] ??
+          match.mapping.bubbleId ??
+          match.segmentId;
+        const segment = transcript?.segments.find(
+          (item) => item.id === match.segmentId,
+        );
+        return {
+          bubbleId,
+          caption: segment?.text ?? match.mapping.transcriptSegmentId,
+          start: segment?.interval.start.value ?? 0,
+          end: segment?.interval.end.value ?? 1,
+          words: segment?.words.map((word) => ({
+            text: word.text,
+            start: word.start.value,
+            end: word.end.value,
+          })),
+        };
+      });
+      window.dispatchEvent(
+        new CustomEvent('comic-editor-apply-mappings', { detail: { items } }),
+      );
+      // Store fitted layouts so export has bubble text placement.
+      const layouts: CaptionLayout[] = [];
+      for (const match of matches) {
+        const bubbleId =
+          mappingChoices[match.mapping.id] ?? match.mapping.bubbleId ?? null;
+        if (!bubbleId) continue;
+        const fitted =
+          match.candidateLayouts.find(
+            (candidate) => candidate.bubbleId === bubbleId,
+          )?.layout ??
+          (match.layout?.bubbleId === bubbleId ? match.layout : null);
+        if (fitted) layouts.push(fitted);
+      }
+      if (layouts.length > 0) {
+        const project = activeProject ?? projectService.newProject();
+        setActiveProject({
+          ...project,
+          captionLayouts: layouts,
+        });
+      }
+      setProjectMessage(
+        `Draft accepted ${items.length} dialogue turn(s). Exporting preview…`,
+      );
+      // Wait until the editor document reflects the batch apply.
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        const doc = editorDocumentRef.current;
+        if (
+          doc &&
+          items.every((item) =>
+            Object.values(doc.dialogues).some(
+              (dialogue) =>
+                dialogue.bubbleId === item.bubbleId &&
+                dialogue.caption === item.caption,
+            ),
+          )
+        )
+          break;
+      }
+      await exportVideo();
+    } catch (cause) {
+      setProjectMessage(
+        cause instanceof Error ? cause.message : 'Produce draft failed.',
+      );
     }
   }
 
@@ -3762,6 +3863,20 @@ export function App() {
                     onClick={() => void automateSpeech()}
                   >
                     {speechAutomationBusy ? 'Running…' : 'Auto everything'}
+                  </button>
+                  <button
+                    className="ui-btn primary"
+                    type="button"
+                    disabled={
+                      speechAutomationBusy ||
+                      mp4Exporting ||
+                      !audioSource?.blob ||
+                      (!pair.original && !pair.cleaned)
+                    }
+                    onClick={() => void produceDraft()}
+                    title="Map dialogue to bubbles, fit captions, and export a draft MP4"
+                  >
+                    {mp4Exporting ? 'Exporting…' : 'Produce draft'}
                   </button>
                 </ToolDrawerRow>
                 <ToolDrawerRow>

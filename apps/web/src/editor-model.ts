@@ -178,6 +178,17 @@ export type EditorAction =
       readonly coalesce?: CoalesceHint;
     }
   | {
+      /** Batch-apply dialogue-to-bubble mappings (draft / accept-all). */
+      readonly type: 'apply-mappings';
+      readonly items: readonly {
+        readonly bubbleId: string;
+        readonly caption: string;
+        readonly start: number;
+        readonly end: number;
+        readonly words?: readonly DialogueWordTiming[];
+      }[];
+    }
+  | {
       readonly type: 'split-dialogue';
       readonly dialogueId: string;
       readonly atSeconds: number;
@@ -935,6 +946,64 @@ export function editorReducer(
         ...document.dialogues,
         [action.dialogueId]: Object.freeze({ ...current, ...patch }),
       }),
+    });
+  } else if (action.type === 'apply-mappings') {
+    const dialogues = { ...document.dialogues };
+    const order = [...document.order];
+    let changed = false;
+    for (const item of action.items) {
+      if (!item?.bubbleId || !document.bubbles[item.bubbleId]) continue;
+      if (
+        !Number.isFinite(item.start) ||
+        !Number.isFinite(item.end) ||
+        item.start < 0 ||
+        item.end <= item.start
+      )
+        continue;
+      let dialogue = Object.values(dialogues).find(
+        (candidate) => candidate.bubbleId === item.bubbleId,
+      );
+      if (!dialogue) {
+        const id = `dialogue:${item.bubbleId}`;
+        if (!dialogues[id]) {
+          const bubble = document.bubbles[item.bubbleId]!;
+          dialogue = Object.freeze({
+            id,
+            bubbleId: item.bubbleId as BubbleId,
+            caption: '',
+            start: 0,
+            end: 1,
+            fontFamily: 'Arial',
+            fontSizePx: 24,
+            lineSpacingPx: 2,
+            paddingPx: 4,
+            position: Object.freeze({
+              x: bubble.boundingBox.x + bubble.boundingBox.width / 2,
+              y: bubble.boundingBox.y + bubble.boundingBox.height / 2,
+              coordinateSpace: document.imageSpace,
+            }),
+            speakerId: '',
+            contextNote: '',
+          });
+          dialogues[id] = dialogue;
+          if (!order.includes(id)) order.push(id);
+        }
+        dialogue = dialogues[id]!;
+      }
+      dialogues[dialogue.id] = Object.freeze({
+        ...dialogue,
+        caption: item.caption,
+        start: item.start,
+        end: item.end,
+        ...(item.words ? { words: Object.freeze([...item.words]) } : {}),
+      });
+      changed = true;
+    }
+    if (!changed) return state;
+    next = Object.freeze({
+      ...document,
+      dialogues: Object.freeze(dialogues),
+      order: Object.freeze(order),
     });
   } else if (action.type === 'split-dialogue') {
     const current = document.dialogues[action.dialogueId];
