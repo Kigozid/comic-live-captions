@@ -1048,7 +1048,7 @@ export function EditingWorkspace({
           onClick={() => setShowDetection((visible) => !visible)}
           type="button"
         >
-          {showDetection ? 'Hide detections' : 'Show detections'}
+          {showDetection ? 'Detections' : 'Detections off'}
         </button>
         <button
           className="canvas-mode-button"
@@ -1057,7 +1057,7 @@ export function EditingWorkspace({
           type="button"
           title="Preview live word-by-word captions synced to the audio clock"
         >
-          {liveCaptions ? 'Live captions: on' : 'Live captions: off'}
+          {liveCaptions ? 'Live captions' : 'Live captions off'}
         </button>
         <button
           className={`canvas-mode-button ${reassignMode ? 'is-active' : ''}`}
@@ -1068,21 +1068,24 @@ export function EditingWorkspace({
         >
           {reassignMode ? 'Pick bubble…' : 'Reassign'}
         </button>
+        <span className="canvas-mode-spacer" aria-hidden="true" />
         <button
           className="canvas-mode-button"
           disabled={selectedBubbleIds.length < 2}
           onClick={mergeSelectedBubbles}
           type="button"
+          title="Merge selected bubbles"
         >
-          Merge {selectedBubbleIds.length > 1 ? selectedBubbleIds.length : ''}
+          Merge
         </button>
         <button
           className="canvas-mode-button"
           disabled={selectedBubbleIds.length !== 1}
           onClick={splitSelectedBubble}
           type="button"
+          title="Split selected bubble at center"
         >
-          Split at center
+          Split
         </button>
         {transcript && (
           <button
