@@ -67,6 +67,7 @@ import type {
 } from '../../../packages/rendering/src/validation.js';
 import { exportComicFrame } from './browser-export.js';
 import { exportMp4ViaServer } from './mp4-export.js';
+import { draftFromBoxes } from './draft-from-boxes.js';
 import type { Mp4ExportProgress, Mp4Resolution } from './mp4-export.js';
 import { VideoExportPanel } from './VideoExportPanel.js';
 import {
@@ -1921,9 +1922,9 @@ export function App() {
   }
 
   /**
-   * Draft-first dubbing: run the auto pipeline (if needed), accept every
-   * proposed mapping, then export a playable draft MP4. Corrections happen
-   * after playback via scrub-and-fix (reassign + word cues).
+   * Draft-first dubbing (default): clean page → draw caption boxes → insert
+   * transcript as typewriter captions. When drawn boxes exist they are the
+   * layout targets (no OCR mapping). Otherwise fall back to speech automation.
    */
   async function produceDraft() {
     if ((!pair.original && !pair.cleaned) || !audioSource?.blob) {
@@ -1931,17 +1932,115 @@ export function App() {
       return;
     }
     try {
+      // 1. Ensure a cleaned page (including bubble interiors).
+      const cleanedReady = await ensureCleanedPage();
+      if (!cleanedReady) {
+        setProjectMessage(
+          'Auto-clean failed. Import a cleaned page or retry auto-clean first.',
+        );
+        return;
+      }
+
+      // 2. Prefer user-drawn caption containers.
+      const doc = editorDocumentRef.current;
+      const drawnBubbles = Object.values(doc?.bubbles ?? {}).filter(
+        (bubble) => bubble.source === 'manual' || bubble.id.startsWith('bubble-'),
+      );
+      const transcript =
+        savedTranscript ?? (await audioControlsRef.current?.transcribe());
+      if (transcript) setSavedTranscript(transcript);
+
+      if (drawnBubbles.length > 0 && transcript) {
+        const imageSpace = doc?.imageSpace;
+        if (!imageSpace) {
+          setProjectMessage('Open the canvas and draw caption boxes first.');
+          return;
+        }
+        const result = draftFromBoxes(
+          drawnBubbles.map((bubble) => ({
+            id: bubble.id,
+            points: bubble.polygon.points.map((point) => ({
+              x: point.x,
+              y: point.y,
+            })),
+          })),
+          transcript.segments.map((segment) => ({
+            id: segment.id,
+            text: segment.text,
+            start: segment.interval.start.value,
+            end: segment.interval.end.value,
+            words: segment.words.map((word) => ({
+              text: word.text,
+              start: word.start.value,
+              end: word.end.value,
+            })),
+          })),
+          imageSpace,
+          { direction: readingDirection },
+        );
+        if (result.assignments.length === 0) {
+          setProjectMessage(
+            'Draw at least one caption box on the canvas, then Produce draft.',
+          );
+          return;
+        }
+        window.dispatchEvent(
+          new CustomEvent('comic-editor-apply-mappings', {
+            detail: {
+              items: result.assignments.map((assignment) => ({
+                bubbleId: assignment.bubbleId,
+                caption: assignment.caption,
+                start: assignment.start,
+                end: assignment.end,
+                ...(assignment.words ? { words: assignment.words } : {}),
+              })),
+            },
+          }),
+        );
+        const project = activeProject ?? projectService.newProject();
+        setActiveProject({ ...project, captionLayouts: result.layouts });
+        const extras: string[] = [];
+        if (result.unusedBoxIds.length > 0)
+          extras.push(
+            `${result.unusedBoxIds.length} empty box(es) left for reassignment`,
+          );
+        if (result.unassignedSegmentIds.length > 0)
+          extras.push(
+            `${result.unassignedSegmentIds.length} line(s) need another box`,
+          );
+        setProjectMessage(
+          `Draft inserted ${result.assignments.length} caption(s) into drawn boxes.${extras.length ? ` ${extras.join(' · ')}.` : ''} Exporting…`,
+        );
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          const updated = editorDocumentRef.current;
+          if (
+            updated &&
+            result.assignments.every((assignment) =>
+              Object.values(updated.dialogues).some(
+                (dialogue) =>
+                  dialogue.bubbleId === assignment.bubbleId &&
+                  dialogue.caption === assignment.caption,
+              ),
+            )
+          )
+            break;
+        }
+        await exportVideo();
+        return;
+      }
+
+      // 3. Fallback: OCR + speech automation mapping.
       let matches = speechProposalsRef.current ?? [];
       if (matches.length === 0) {
         matches = await automateSpeech();
       }
       if (matches.length === 0) {
         setProjectMessage(
-          'Draft mapping found no dialogue turns. Check transcription and bubbles, then retry.',
+          'Draw caption boxes on the cleaned page (or run detection), then Produce draft.',
         );
         return;
       }
-      const transcript = savedTranscript;
       const items = matches.map((match) => {
         const bubbleId =
           mappingChoices[match.mapping.id] ??
@@ -1965,7 +2064,6 @@ export function App() {
       window.dispatchEvent(
         new CustomEvent('comic-editor-apply-mappings', { detail: { items } }),
       );
-      // Store fitted layouts so export has bubble text placement.
       const layouts: CaptionLayout[] = [];
       for (const match of matches) {
         const bubbleId =
@@ -1988,14 +2086,13 @@ export function App() {
       setProjectMessage(
         `Draft accepted ${items.length} dialogue turn(s). Exporting preview…`,
       );
-      // Wait until the editor document reflects the batch apply.
       for (let attempt = 0; attempt < 40; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 25));
-        const doc = editorDocumentRef.current;
+        const updated = editorDocumentRef.current;
         if (
-          doc &&
+          updated &&
           items.every((item) =>
-            Object.values(doc.dialogues).some(
+            Object.values(updated.dialogues).some(
               (dialogue) =>
                 dialogue.bubbleId === item.bubbleId &&
                 dialogue.caption === item.caption,
@@ -3828,6 +3925,19 @@ export function App() {
               <>
                 <ToolDrawerSection title="Draft" defaultOpen>
                   <ToolDrawerRow stacked>
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      <strong>1.</strong> Clean page ·{' '}
+                      <strong>2.</strong> Draw caption boxes (+ Bubble) ·{' '}
+                      <strong>3.</strong> Produce draft
+                    </p>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={!pair.original || autoCleanBusy || busyRole !== null}
+                      onClick={() => void autoCleanFromOriginal()}
+                    >
+                      {autoCleanBusy ? 'Cleaning…' : '1 · Clean page'}
+                    </button>
                     <button
                       className="ui-btn primary"
                       type="button"
@@ -3838,17 +3948,17 @@ export function App() {
                         (!pair.original && !pair.cleaned)
                       }
                       onClick={() => void produceDraft()}
-                      title="Map dialogue to bubbles, fit captions, and export a draft MP4"
+                      title="Clean page if needed, insert captions into drawn boxes (or detected bubbles), export draft MP4"
                     >
                       {mp4Exporting
                         ? 'Exporting…'
                         : speechAutomationBusy
-                          ? 'Mapping…'
-                          : 'Produce draft'}
+                          ? 'Working…'
+                          : '3 · Produce draft'}
                     </button>
                     <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
-                      Map speech → bubbles → typewriter captions, then export.
-                      Fix with Reassign and Word cues afterward.
+                      Draw empty boxes on the cleaned page for live typewriter
+                      captions. Fix with Reassign and Word cues after playback.
                     </p>
                   </ToolDrawerRow>
                   {speechAutomationWarning ? (
