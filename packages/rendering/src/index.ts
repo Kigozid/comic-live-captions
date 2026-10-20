@@ -1,6 +1,11 @@
 import type { CaptionLayout } from '@comic-captioner/core';
 import sharp from 'sharp';
-import { renderCaptionLayerSvg, renderDebugLayerSvg } from './svg.js';
+import {
+  renderCaptionLayerSvg,
+  renderDebugLayerSvg,
+  renderTimedCaptionLayerSvg,
+  timedCaptionLayoutsFromExport,
+} from './svg.js';
 import type { RenderDebugOverlay } from './svg.js';
 import {
   ExportValidationError,
@@ -13,8 +18,10 @@ export {
   renderCaptionLayerSvg,
   renderTimedCaptionLayerSvg,
   renderDebugLayerSvg,
+  timedCaptionLayoutsFromExport,
 } from './svg.js';
 export type {
+  ExportWordTiming,
   RenderDebugOverlay,
   TimedCaptionLayout,
   TimedCaptionRenderOptions,
@@ -57,13 +64,11 @@ export class RenderingEngine {
       throw new RangeError('Frame time must be finite and non-negative.');
     const report = this.validate(input);
     if (!report.valid) throw new ExportValidationError(report);
-    const active = input.captions.filter(
-      (caption) => caption.start! <= input.time && input.time < caption.end!,
-    );
-    const output = await this.renderPng(
-      input.sourceImage,
-      active.map((caption) => caption.layout!),
-    );
+    const timed = timedCaptionLayoutsFromExport(input.captions);
+    const output = await this.renderPng(input.sourceImage, undefined, {
+      timed,
+      timeSeconds: input.time,
+    });
     return input.format === 'jpeg'
       ? sharp(output)
           .jpeg({ quality: input.quality ?? 90 })
@@ -73,17 +78,28 @@ export class RenderingEngine {
 
   async renderPng(
     comicImage: Uint8Array,
-    layouts: readonly CaptionLayout[],
-    options: { readonly debugOverlays?: readonly RenderDebugOverlay[] } = {},
+    layouts?: readonly CaptionLayout[],
+    options: {
+      readonly debugOverlays?: readonly RenderDebugOverlay[];
+      readonly timed?: ReturnType<typeof timedCaptionLayoutsFromExport>;
+      readonly timeSeconds?: number;
+    } = {},
   ): Promise<Buffer> {
     const metadata = await sharp(comicImage).metadata();
     if (!metadata.width || !metadata.height)
       throw new Error('Comic image dimensions could not be read.');
+    const captionSvg =
+      options.timed !== undefined && options.timeSeconds !== undefined
+        ? renderTimedCaptionLayerSvg(
+            metadata.width,
+            metadata.height,
+            options.timed,
+            options.timeSeconds,
+          )
+        : renderCaptionLayerSvg(metadata.width, metadata.height, layouts ?? []);
     const composites: sharp.OverlayOptions[] = [
       {
-        input: Buffer.from(
-          renderCaptionLayerSvg(metadata.width, metadata.height, layouts),
-        ),
+        input: Buffer.from(captionSvg),
       },
     ];
     if (options.debugOverlays?.length) {

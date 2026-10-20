@@ -133,6 +133,11 @@ export function EditingWorkspace({
     readonly caption: string;
     readonly start: number;
     readonly end: number;
+    readonly words?: readonly {
+      readonly text: string;
+      readonly start: number;
+      readonly end: number;
+    }[];
   } | null;
   readonly onDocumentChange?: (document: EditorDocument | null) => void;
 }) {
@@ -295,7 +300,7 @@ export function EditingWorkspace({
   const [bubbleEditError, setBubbleEditError] = useState<string | null>(null);
   const [showDetection, setShowDetection] = useState(true);
   const [canvasMode, setCanvasMode] = useState<'select' | 'bubble'>('select');
-  const [liveCaptions, setLiveCaptions] = useState(false);
+  const [liveCaptions, setLiveCaptions] = useState(true);
   const [selectedDialogueId, setSelectedDialogueId] = useState<string | null>(
     null,
   );
@@ -412,6 +417,7 @@ export function EditingWorkspace({
         caption: mappingCommand.caption,
         start: mappingCommand.start,
         end: mappingCommand.end,
+        ...(mappingCommand.words ? { words: mappingCommand.words } : {}),
       },
     });
   }, [document, mappingCommand]);
@@ -794,6 +800,11 @@ export function EditingWorkspace({
         caption: segment.text,
         start: segment.interval.start.value,
         end: segment.interval.end.value,
+        words: segment.words.map((word) => ({
+          text: word.text,
+          start: word.start.value,
+          end: word.end.value,
+        })),
       },
     });
     setMappingProposals((previous) =>
@@ -1279,14 +1290,20 @@ export function EditingWorkspace({
                 })}
               {Object.values(document.dialogues).map((dialogue) => {
                 const words = dialogue.caption.split(/\s+/).filter(Boolean);
-                const segment = transcript?.segments.find(
-                  (item) => item.id === dialogue.id,
-                );
-                const realWords = segment?.words.map((word) => ({
-                  text: word.text,
-                  startSeconds: word.start.value,
-                  endSeconds: word.end.value,
-                }));
+                const realWords =
+                  dialogue.words && dialogue.words.length === words.length
+                    ? dialogue.words.map((word) => ({
+                        text: word.text,
+                        startSeconds: word.start,
+                        endSeconds: word.end,
+                      }))
+                    : transcript?.segments
+                        .find((item) => item.id === dialogue.id)
+                        ?.words.map((word) => ({
+                          text: word.text,
+                          startSeconds: word.start.value,
+                          endSeconds: word.end.value,
+                        }));
                 const tokens =
                   realWords && realWords.length === words.length
                     ? realWords

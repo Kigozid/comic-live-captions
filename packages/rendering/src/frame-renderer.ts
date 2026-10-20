@@ -1,5 +1,8 @@
 import sharp from 'sharp';
-import { captionMotionAtTime, renderCaptionLayerSvg } from './svg.js';
+import {
+  renderTimedCaptionLayerSvg,
+  timedCaptionLayoutsFromExport,
+} from './svg.js';
 import { ExportValidationError, validateFrameExport } from './validation.js';
 import type { ExportBubble, ExportCaption } from './validation.js';
 
@@ -114,29 +117,23 @@ async function composeFrame(
     input.width,
     input.height,
   );
-  const active = input.captions.filter(
-    (caption) => caption.start! <= time && time < caption.end!,
-  );
-  // One SVG layer per active caption so each keeps its own fitted bubble
-  // geometry and its own audio-paced entrance/exit. No bottom subtitle track.
-  const captionLayers = await Promise.all(
-    active.map(async (caption) => ({
-      input: await sharp(
-        Buffer.from(
-          renderCaptionLayerSvg(
-            metadata.width!,
-            metadata.height!,
-            [caption.layout!],
-            captionMotionAtTime(caption.start!, caption.end!, time),
-          ),
-        ),
-      )
-        .png()
-        .toBuffer(),
-    })),
-  );
+  // Progressive word-by-word reveal shared with live preview and Remotion.
+  // Inactive bubbles stay empty; only started words are painted.
+  const timed = timedCaptionLayoutsFromExport(input.captions);
+  const captionLayer = await sharp(
+    Buffer.from(
+      renderTimedCaptionLayerSvg(
+        metadata.width!,
+        metadata.height!,
+        timed,
+        time,
+      ),
+    ),
+  )
+    .png()
+    .toBuffer();
   const pageLayer = await sharp(input.pageImage)
-    .composite(captionLayers)
+    .composite([{ input: captionLayer }])
     .png()
     .toBuffer();
   const fittedPage = await sharp(pageLayer)

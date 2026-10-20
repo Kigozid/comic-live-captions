@@ -1,4 +1,7 @@
-import { renderCaptionLayerSvg } from '../../../packages/rendering/src/svg.js';
+import {
+  renderTimedCaptionLayerSvg,
+  timedCaptionLayoutsFromExport,
+} from '../../../packages/rendering/src/svg.js';
 import { validateFrameExport } from '../../../packages/rendering/src/validation.js';
 import type {
   ExportBubble,
@@ -22,13 +25,12 @@ export async function exportComicFrame(
     throw new RangeError('Export time must be non-negative.');
   const sourceBitmap = await createImageBitmap(source);
   try {
-    const activeLayouts = captions
-      .filter((caption) => caption.start! <= time && time < caption.end!)
-      .map((caption) => caption.layout!);
-    const svg = renderCaptionLayerSvg(
+    const timed = timedCaptionLayoutsFromExport(captions);
+    const svg = renderTimedCaptionLayerSvg(
       sourceBitmap.width,
       sourceBitmap.height,
-      activeLayouts,
+      timed,
+      time,
     );
     const overlay = await createImageBitmap(
       new Blob([svg], { type: 'image/svg+xml' }),

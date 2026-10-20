@@ -520,6 +520,11 @@ export function App() {
     readonly caption: string;
     readonly start: number;
     readonly end: number;
+    readonly words?: readonly {
+      readonly text: string;
+      readonly start: number;
+      readonly end: number;
+    }[];
   } | null>(null);
   const [mappingChoices, setMappingChoices] = useState<Record<string, string>>(
     {},
@@ -2276,13 +2281,7 @@ export function App() {
           ) ?? null,
         start: dialogue.start,
         end: dialogue.end,
-        words: savedTranscript?.segments
-          .find((segment) => segment.id === id)
-          ?.words.map((word) => ({
-            text: word.text,
-            start: word.start.value,
-            end: word.end.value,
-          })),
+        words: dialogueExportWords(dialogue, id),
         mapped:
           Boolean(document.bubbles[dialogue.bubbleId]) &&
           (mapping?.bubbleId === undefined ||
@@ -2326,6 +2325,27 @@ export function App() {
     }
   }
 
+  function dialogueExportWords(
+    dialogue: { readonly words?: readonly { text: string; start: number; end: number }[] },
+    dialogueId: string,
+  ) {
+    if (dialogue.words && dialogue.words.length > 0) {
+      return dialogue.words.map((word) => ({
+        text: word.text,
+        start: word.start,
+        end: word.end,
+      }));
+    }
+    const segment = savedTranscript?.segments.find(
+      (item) => item.id === dialogueId,
+    );
+    return segment?.words.map((word) => ({
+      text: word.text,
+      start: word.start.value,
+      end: word.end.value,
+    }));
+  }
+
   function exportTimelineData() {
     const document = editorDocumentRef.current;
     if (!document) return { captions: [], bubbles: [] };
@@ -2357,13 +2377,7 @@ export function App() {
           ) ?? null,
         start: dialogue.start,
         end: dialogue.end,
-        words: savedTranscript?.segments
-          .find((segment) => segment.id === id)
-          ?.words.map((word) => ({
-            text: word.text,
-            start: word.start.value,
-            end: word.end.value,
-          })),
+        words: dialogueExportWords(dialogue, id),
         mapped:
           Boolean(document.bubbles[dialogue.bubbleId]) &&
           (mapping?.bubbleId === undefined ||
@@ -2975,6 +2989,11 @@ export function App() {
       caption: segment.text,
       start: segment.interval.start.value,
       end: segment.interval.end.value,
+      words: segment.words.map((word) => ({
+        text: word.text,
+        start: word.start.value,
+        end: word.end.value,
+      })),
     }));
     const automated = speechProposals?.find(
       (proposal) => proposal.mapping.id === mapping.id,

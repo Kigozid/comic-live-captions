@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CaptionLayout, ImageSpace, Point } from '@comic-captioner/core';
 import {
   renderTimedCaptionLayerSvg,
+  timedCaptionLayoutsFromExport,
   type TimedCaptionLayout,
 } from '@comic-captioner/rendering';
 
@@ -108,5 +109,79 @@ describe('renderTimedCaptionLayerSvg — progressive word reveal', () => {
     const a = renderTimedCaptionLayerSvg(200, 200, [item], 1.5);
     const b = renderTimedCaptionLayerSvg(200, 200, [item], 1.5);
     expect(a).toBe(b);
+  });
+});
+
+describe('timedCaptionLayoutsFromExport — shared export → reveal bridge', () => {
+  const fitted = layout('c1', 'b1', ['The city is under', 'attack!']);
+
+  it('maps acoustic word timings onto the fitted layout tokens', () => {
+    const [timed] = timedCaptionLayoutsFromExport([
+      {
+        layout: fitted,
+        start: 1,
+        end: 2,
+        words: [
+          { text: 'The', start: 1, end: 1.1 },
+          { text: 'city', start: 1.1, end: 1.2 },
+          { text: 'is', start: 1.2, end: 1.3 },
+          { text: 'under', start: 1.3, end: 1.5 },
+          { text: 'attack!', start: 1.5, end: 2 },
+        ],
+      },
+    ]);
+    expect(timed?.words).toHaveLength(5);
+    expect(timed?.words?.[0]?.startSeconds).toBe(1);
+    expect(timed?.words?.[4]?.endSeconds).toBe(2);
+  });
+
+  it('synthesizes even slices when acoustic words are missing or mismatched', () => {
+    const missing = timedCaptionLayoutsFromExport([
+      { layout: fitted, start: 1, end: 2 },
+    ])[0]!;
+    expect(missing.words).toHaveLength(5);
+    expect(missing.words?.every((word) => word.estimated)).toBe(true);
+
+    const mismatched = timedCaptionLayoutsFromExport([
+      {
+        layout: fitted,
+        start: 1,
+        end: 2,
+        words: [{ text: 'The', start: 1, end: 2 }],
+      },
+    ])[0]!;
+    expect(mismatched.words).toHaveLength(5);
+    expect(mismatched.words?.every((word) => word.estimated)).toBe(true);
+  });
+
+  it('skips captions without layout or timing', () => {
+    expect(
+      timedCaptionLayoutsFromExport([
+        { layout: null, start: 1, end: 2 },
+        { layout: fitted, start: null, end: 2 },
+        { layout: fitted, start: 1, end: null },
+      ]),
+    ).toHaveLength(0);
+  });
+
+  it('drives progressive reveal through the export bridge (not full-line dumps)', () => {
+    const timed = timedCaptionLayoutsFromExport([
+      {
+        layout: fitted,
+        start: 1,
+        end: 2,
+        words: [
+          { text: 'The', start: 1, end: 1.2 },
+          { text: 'city', start: 1.2, end: 1.4 },
+          { text: 'is', start: 1.4, end: 1.55 },
+          { text: 'under', start: 1.55, end: 1.75 },
+          { text: 'attack!', start: 1.75, end: 2 },
+        ],
+      },
+    ]);
+    const before = renderTimedCaptionLayerSvg(200, 200, timed, 1.1);
+    const mid = renderTimedCaptionLayerSvg(200, 200, timed, 1.5);
+    expect(revealedCount(before)).toBe(1);
+    expect(revealedCount(mid)).toBeLessThan(5);
   });
 });
