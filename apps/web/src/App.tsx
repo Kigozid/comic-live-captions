@@ -76,6 +76,11 @@ import {
   ToolDrawerSection,
 } from './ToolDrawer.js';
 import {
+  WorkflowBar,
+  type WorkflowStepId,
+} from './WorkflowBar.js';
+import { buildWorkflowSteps } from './workflow-steps.js';
+import {
   buildMultiPageExportPlan,
   createPageWorkspace,
   movePage,
@@ -548,11 +553,11 @@ export function App() {
   const mp4AbortRef = useRef<AbortController | null>(null);
   const [projectPages, setProjectPages] = useState<readonly PageWorkspace[]>([]);
   const [activePageId, setActivePageId] = useState<string | null>(null);
-  const [editorTheme, setEditorTheme] = useState<'light' | 'dark'>('light');
-  const [activeTool, setActiveTool] = useState('pages');
+  const [editorTheme, setEditorTheme] = useState<'light' | 'dark'>('dark');
+  const [activeTool, setActiveTool] = useState('ocr');
   const [canvasZoom, setCanvasZoom] = useState(100);
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
-  const [timelineHeight, setTimelineHeight] = useState(280);
+  const [timelineHeight, setTimelineHeight] = useState(200);
   const [timelineZoom, setTimelineZoom] = useState(40);
   const [timelineSelection, setTimelineSelection] = useState<{
     kind: 'page' | 'audio' | 'caption';
@@ -2544,6 +2549,37 @@ export function App() {
     }));
   }
 
+  function workflowToolForStep(id: WorkflowStepId): string {
+    switch (id) {
+      case 'import':
+        return 'import';
+      case 'audio':
+        return 'audio';
+      case 'clean':
+      case 'boxes':
+      case 'draft':
+        return 'ocr';
+      default:
+        return 'ocr';
+    }
+  }
+
+  function workflowStepFromTool(tool: string): WorkflowStepId | null {
+    if (tool === 'import') return 'import';
+    if (tool === 'audio') return 'audio';
+    if (tool === 'ocr') return 'draft';
+    return null;
+  }
+
+  const workflowSteps = buildWorkflowSteps({
+    hasPage: Boolean(pair.original),
+    hasAudio: Boolean(audioSource?.blob),
+    hasCleaned: Boolean(pair.cleaned),
+    hasBoxes: Object.values(editorDocument?.bubbles ?? {}).length > 0,
+    cleaning: autoCleanBusy,
+    producing: mp4Exporting || speechAutomationBusy,
+  });
+
   function exportTimelineData() {
     const document = editorDocumentRef.current;
     if (!document) return { captions: [], bubbles: [] };
@@ -3466,6 +3502,19 @@ export function App() {
             <IconSave size={14} /> {savingProject ? 'Saving…' : 'Save'}
           </button>
           <button
+            className="ui-btn primary capcut-export"
+            type="button"
+            disabled={mp4Exporting || autoCleanBusy}
+            onClick={() => {
+              setActiveTool('export');
+              setInspectorOpen(true);
+              void exportVideo();
+            }}
+            title="Export MP4 (captions inside speech bubbles)"
+          >
+            {mp4Exporting ? 'Exporting…' : 'Export'}
+          </button>
+          <button
             className="ui-btn icon"
             type="button"
             aria-label="Toggle inspector"
@@ -3476,16 +3525,16 @@ export function App() {
         </div>
       </header>
 
-      <nav className="editor-rail" aria-label="Tools">
+      <nav className="tool-row" aria-label="Tools">
         {(
           [
-            ['pages', 'Pages', IconPages],
-            ['import', 'Import', IconUpload],
-            ['audio', 'Narration', IconAudio],
             ['ocr', 'Draft', IconOcr],
-            ['captions', 'Captions', IconText],
+            ['import', 'Media', IconUpload],
+            ['audio', 'Audio', IconAudio],
+            ['captions', 'Text', IconText],
             ['bubbles', 'Bubbles', IconBubble],
-            ['video', 'Composition', IconVideo],
+            ['pages', 'Pages', IconPages],
+            ['video', 'Effects', IconVideo],
             ['export', 'Export', IconSave],
             ['settings', 'Settings', IconTheme],
           ] as const
@@ -3493,7 +3542,7 @@ export function App() {
           <button
             key={id}
             type="button"
-            className={`rail-btn ${activeTool === id ? 'active' : ''}`}
+            className={`tool-row-btn ${activeTool === id ? 'active' : ''}`}
             aria-label={label}
             aria-pressed={activeTool === id}
             title={label}
@@ -3501,13 +3550,12 @@ export function App() {
               setActiveTool(id);
               setInspectorOpen(true);
               if (id === 'settings') {
-                // Inspector Project tab shows theme + project settings.
                 setTimelineSelection(null);
               }
             }}
           >
             <RailIcon />
-            <span className="tooltip">{label}</span>
+            <span>{label}</span>
           </button>
         ))}
       </nav>
@@ -3520,18 +3568,39 @@ export function App() {
           </span>
           <span>{activeTool}</span>
         </div>
-        <div
-          style={{
-            width: '100%',
-            height: '100%',
-            overflow: 'hidden',
-            padding: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
+        <div className="stage-flow">
+        {/* Major workflow first; secondary tools live in tool-drawer pull-downs. */}
+        <WorkflowBar
+          steps={workflowSteps}
+          activeStep={workflowStepFromTool(activeTool)}
+          onStepSelect={(id) => {
+            setActiveTool(workflowToolForStep(id));
+            setInspectorOpen(true);
+            if (id === 'audio') audioControlsRef.current?.import();
+            if (id === 'import') {
+              // Focus page import in the Import drawer.
+            }
+            if (id === 'clean') void autoCleanFromOriginal();
+            if (id === 'boxes') setProjectMessage('Draw caption boxes with + Bubble on the cleaned page.');
+            if (id === 'draft') void produceDraft();
           }}
-        >
-        <div className="canvas-bar" role="toolbar" aria-label="Canvas bar">
+          onProduceDraft={() => {
+            setActiveTool('ocr');
+            setInspectorOpen(true);
+            void produceDraft();
+          }}
+          produceDisabled={
+            speechAutomationBusy ||
+            mp4Exporting ||
+            !audioSource?.blob ||
+            (!pair.original && !pair.cleaned)
+          }
+          produceBusy={mp4Exporting || speechAutomationBusy}
+          produceLabel={
+            mp4Exporting ? 'Exporting…' : speechAutomationBusy ? 'Working…' : 'Produce draft'
+          }
+        />
+        <div className="canvas-bar stage-toolbar" role="toolbar" aria-label="Canvas bar">
           <button
             className="ui-btn"
             type="button"
@@ -3542,43 +3611,15 @@ export function App() {
           >
             Fit
           </button>
-          <button
-            className="ui-btn primary"
-            type="button"
-            disabled={
-              speechAutomationBusy ||
-              mp4Exporting ||
-              !audioSource?.blob ||
-              (!pair.original && !pair.cleaned)
-            }
-            onClick={() => {
-              setActiveTool('ocr');
-              setInspectorOpen(true);
-              void produceDraft();
-            }}
-            title="Map dialogue, fit typewriter captions, export draft MP4"
-          >
-            {mp4Exporting ? 'Exporting…' : 'Produce draft'}
-          </button>
-          <button
-            className="ui-btn"
-            type="button"
-            onClick={() => void addEmptyPage()}
-          >
-            + Page
-          </button>
-          <button
-            className="ui-btn"
-            type="button"
-            onClick={() => {
-              setActiveTool('pages');
-              setInspectorOpen(true);
-            }}
-          >
-            Page settings
-          </button>
           <div className="canvas-bar-spacer" />
-          <div className="playback-bar" role="toolbar" aria-label="Playback">
+          {activeTranscriptSegment?.text ? (
+            <span className="live-transcript" aria-live="polite">
+              {activeTranscriptSegment.text}
+            </span>
+          ) : null}
+        </div>
+        <div className="editor-player" role="toolbar" aria-label="Playback">
+          <div className="playback-bar">
             <button
               className="ui-btn icon"
               type="button"
@@ -3695,11 +3736,6 @@ export function App() {
               {audioSource ? 'Replace audio' : 'Import audio'}
             </button>
           </div>
-          {activeTranscriptSegment?.text ? (
-            <span className="live-transcript" aria-live="polite">
-              {activeTranscriptSegment.text}
-            </span>
-          ) : null}
         </div>
         {/* IMG.LY-style workspace: tool drawer + canvas. No legacy card stack. */}
         {projectMessage && (
@@ -3727,14 +3763,7 @@ export function App() {
           </div>
         )}
         <div
-          style={{
-            display: 'flex',
-            gap: 12,
-            minHeight: 0,
-            flex: 1,
-            alignItems: 'stretch',
-            marginTop: 10,
-          }}
+          className="stage-body"
         >
           <ToolDrawer
             tool={activeTool}
@@ -3851,19 +3880,22 @@ export function App() {
                   </button>
                 </ToolDrawerRow>
                 {alignment && alignmentImages && original && (
-                  <ToolDrawerRow stacked>
-                    <AlignmentReview
-                      alignment={alignment}
-                      image={{ ...original, src: alignmentImages[alignmentMode] }}
-                      mode={alignmentMode}
-                      onModeChange={setAlignmentMode}
-                      onSave={saveManualAlignment}
-                    />
-                  </ToolDrawerRow>
+                  <ToolDrawerSection title="Alignment review" defaultOpen={false}>
+                    <ToolDrawerRow stacked>
+                      <AlignmentReview
+                        alignment={alignment}
+                        image={{ ...original, src: alignmentImages[alignmentMode] }}
+                        mode={alignmentMode}
+                        onModeChange={setAlignmentMode}
+                        onSave={saveManualAlignment}
+                      />
+                    </ToolDrawerRow>
+                  </ToolDrawerSection>
                 )}
                 {pair.original && (
-                  <ToolDrawerRow stacked>
-                    <LetteringCleanupReview
+                  <ToolDrawerSection title="Lettering cleanup" defaultOpen={false}>
+                    <ToolDrawerRow stacked>
+                      <LetteringCleanupReview
                       originalUrl={sourceUrls.original ?? null}
                       cleanedUrl={sourceUrls.cleaned ?? null}
                       maskUrl={letteringMaskUrl}
@@ -3920,6 +3952,7 @@ export function App() {
                       }}
                     />
                   </ToolDrawerRow>
+                  </ToolDrawerSection>
                 )}
               </ToolDrawerSection>
             )}
@@ -3982,7 +4015,7 @@ export function App() {
                       disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
                       onClick={() => void detectBubbles()}
                     >
-                      {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
+                      {pageAnalysisBusy ? 'Scanning…' : 'Detect panels + bubbles'}
                     </button>
                     <button
                       className="ui-btn"
@@ -3993,6 +4026,13 @@ export function App() {
                       Analyze page
                     </button>
                   </ToolDrawerRow>
+                  {pageAnalysis?.panels?.length ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '4px 0 0' }}>
+                      {pageAnalysis.panels.length} panel
+                      {pageAnalysis.panels.length === 1 ? '' : 's'} detected on the page
+                      preview.
+                    </p>
+                  ) : null}
                   <ToolDrawerRow>
                     <button
                       className="ui-btn"
@@ -4089,46 +4129,52 @@ export function App() {
               </>
             )}
             {activeTool === 'captions' && (
-              <ToolDrawerSection title="Captions">
-                <ToolDrawerRow>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={!savedTranscript || !editorDocument}
-                    onClick={() => {
-                      window.dispatchEvent(
-                        new CustomEvent('comic-editor-suggest-matches'),
-                      );
-                      setProjectMessage(
-                        'Dialogue match suggestions requested. Review them on the canvas.',
-                      );
-                    }}
-                  >
-                    Suggest dialogue matches
-                  </button>
-                </ToolDrawerRow>
-                {activeReviewText ? (
-                  <ToolDrawerRow stacked>
-                    <p style={{ fontSize: 12, margin: 0 }}>{activeReviewText}</p>
-                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
-                      {activeReviewLayout
-                        ? `Fitted · ${activeReviewLayout.fontSizePx}px · ${activeReviewLayout.lines.length} lines`
-                        : 'Layout needed'}
-                    </p>
-                    {activeTranscriptMapping ? (
-                      <button
-                        className="ui-btn"
-                        type="button"
-                        onClick={() =>
-                          approveLiveMapping(activeTranscriptMapping)
-                        }
-                      >
-                        Approve mapping
-                      </button>
-                    ) : null}
+              <>
+                <ToolDrawerSection title="Captions" defaultOpen>
+                  <ToolDrawerRow>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={!savedTranscript || !editorDocument}
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('comic-editor-suggest-matches'),
+                        );
+                        setProjectMessage(
+                          'Dialogue match suggestions requested. Review them on the canvas.',
+                        );
+                      }}
+                    >
+                      Suggest dialogue matches
+                    </button>
                   </ToolDrawerRow>
-                ) : null}
-                <ToolDrawerRow stacked>
+                  {activeReviewText ? (
+                    <ToolDrawerRow stacked>
+                      <p style={{ fontSize: 12, margin: 0 }}>{activeReviewText}</p>
+                      <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                        {activeReviewLayout
+                          ? `Fitted · ${activeReviewLayout.fontSizePx}px · ${activeReviewLayout.lines.length} lines`
+                          : 'Layout needed'}
+                      </p>
+                      {activeTranscriptMapping ? (
+                        <button
+                          className="ui-btn"
+                          type="button"
+                          onClick={() =>
+                            approveLiveMapping(activeTranscriptMapping)
+                          }
+                        >
+                          Approve mapping
+                        </button>
+                      ) : null}
+                    </ToolDrawerRow>
+                  ) : null}
+                  <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
+                    Select a bubble or caption on the canvas to edit text and timing.
+                  </p>
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Caption list" defaultOpen={false}>
+                  <ToolDrawerRow stacked>
                   {reviewDialogues.length === 0 ? (
                     <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
                       No captions yet. Detect bubbles and map transcript lines.
@@ -4177,23 +4223,27 @@ export function App() {
                     ))
                   )}
                 </ToolDrawerRow>
-                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
-                  Select a bubble or caption on the canvas to edit text and timing.
-                </p>
-              </ToolDrawerSection>
+                </ToolDrawerSection>
+              </>
             )}
             {activeTool === 'bubbles' && (
-              <ToolDrawerSection title="Bubbles">
-                <ToolDrawerRow>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
-                    onClick={() => void detectBubbles()}
-                  >
-                    {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
-                  </button>
-                </ToolDrawerRow>
+              <>
+                <ToolDrawerSection title="Bubbles" defaultOpen>
+                  <ToolDrawerRow>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
+                      onClick={() => void detectBubbles()}
+                    >
+                      {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
+                    </button>
+                  </ToolDrawerRow>
+                  <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
+                    Select one on the canvas to edit bounds and class in the inspector.
+                  </p>
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Bubble list" defaultOpen={false}>
                 <ToolDrawerRow stacked>
                   {Object.values(editorDocument?.bubbles ?? {}).length === 0 ? (
                     <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
@@ -4245,10 +4295,8 @@ export function App() {
                     )
                   )}
                 </ToolDrawerRow>
-                <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: '8px 0 0' }}>
-                  Select one to edit bounds and class in the inspector.
-                </p>
               </ToolDrawerSection>
+              </>
             )}
             {activeTool === 'audio' && (
               <ToolDrawerSection title="Narration">
@@ -4343,92 +4391,42 @@ export function App() {
               </ToolDrawerSection>
             )}
             {activeTool === 'export' && (
-              <ToolDrawerSection title="Export">
-                <ToolDrawerRow>
-                  <select
-                    aria-label="MP4 export resolution"
-                    className="ui-select"
-                    disabled={mp4Exporting}
-                    value={mp4Resolution}
-                    onChange={(event) =>
-                      setMp4Resolution(event.currentTarget.value as Mp4Resolution)
-                    }
-                  >
-                    <option value="720p">720p</option>
-                    <option value="1080p">1080p</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {mp4Resolution === 'custom' ? (
-                    <>
-                      <input
-                        aria-label="Custom video width"
-                        className="inspector-field"
-                        type="number"
-                        min="16"
-                        max="7680"
-                        step="2"
-                        value={customVideoWidth}
-                        onChange={(event) =>
-                          setCustomVideoWidth(event.currentTarget.value)
-                        }
-                      />
-                      <span>×</span>
-                      <input
-                        aria-label="Custom video height"
-                        className="inspector-field"
-                        type="number"
-                        min="16"
-                        max="7680"
-                        step="2"
-                        value={customVideoHeight}
-                        onChange={(event) =>
-                          setCustomVideoHeight(event.currentTarget.value)
-                        }
-                      />
-                    </>
-                  ) : null}
-                </ToolDrawerRow>
-                {mp4Progress ? (
-                  <ToolDrawerRow>
-                    <progress
-                      aria-label="MP4 export progress"
-                      className="w-28"
-                      max="100"
-                      value={mp4Progress.percent}
-                    />
-                    <span style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
-                      {Math.floor(mp4Progress.percent)}%
-                    </span>
+              <>
+                <ToolDrawerSection title="Export" defaultOpen>
+                  <ToolDrawerRow stacked>
+                    <button
+                      className="ui-btn primary"
+                      disabled={
+                        (!pair.original && !pair.cleaned) ||
+                        !audioSource?.blob ||
+                        !editorDocument ||
+                        autoCleanBusy
+                      }
+                      onClick={() => void exportVideo()}
+                    >
+                      {mp4Exporting ? 'Exporting MP4…' : 'Export MP4 (FFmpeg)'}
+                    </button>
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      Captions render inside speech bubbles — never a bottom subtitle track.
+                    </p>
                   </ToolDrawerRow>
-                ) : null}
-                <ToolDrawerRow stacked>
-                  <button
-                    className="ui-btn"
-                    disabled={!activeProject}
-                    onClick={() => void exportProject()}
-                  >
-                    Project archive
-                  </button>
-                  <button
-                    className="ui-btn"
-                    disabled={!pair.original || !editorDocument}
-                    onClick={() => void exportFrame('png')}
-                  >
-                    PNG frame
-                  </button>
-                  <button
-                    className="ui-btn primary"
-                    disabled={
-                      (!pair.original && !pair.cleaned) ||
-                      !audioSource?.blob ||
-                      !editorDocument ||
-                      autoCleanBusy
-                    }
-                    onClick={() => void exportVideo()}
-                  >
-                    {mp4Exporting ? 'Exporting MP4…' : 'Export MP4 (FFmpeg)'}
-                  </button>
-                  <VideoExportPanel
+                  {mp4Progress ? (
+                    <ToolDrawerRow>
+                      <progress
+                        aria-label="MP4 export progress"
+                        className="w-28"
+                        max="100"
+                        value={mp4Progress.percent}
+                      />
+                      <span style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
+                        {Math.floor(mp4Progress.percent)}%
+                      </span>
+                    </ToolDrawerRow>
+                  ) : null}
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Remotion motion comic" defaultOpen={false}>
+                  <ToolDrawerRow stacked>
+                    <VideoExportPanel
                     pageBlob={sourceBlobs.cleaned ?? sourceBlobs.original ?? null}
                     pageWidth={
                       pair.cleaned?.dimensions.width ??
@@ -4455,7 +4453,70 @@ export function App() {
                     onMessage={setProjectMessage}
                   />
                 </ToolDrawerRow>
-              </ToolDrawerSection>
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Export options" defaultOpen={false}>
+                  <ToolDrawerRow>
+                    <select
+                      aria-label="MP4 export resolution"
+                      className="ui-select"
+                      disabled={mp4Exporting}
+                      value={mp4Resolution}
+                      onChange={(event) =>
+                        setMp4Resolution(event.currentTarget.value as Mp4Resolution)
+                      }
+                    >
+                      <option value="720p">720p</option>
+                      <option value="1080p">1080p</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    {mp4Resolution === 'custom' ? (
+                      <>
+                        <input
+                          aria-label="Custom video width"
+                          className="inspector-field"
+                          type="number"
+                          min="16"
+                          max="7680"
+                          step="2"
+                          value={customVideoWidth}
+                          onChange={(event) =>
+                            setCustomVideoWidth(event.currentTarget.value)
+                          }
+                        />
+                        <span>×</span>
+                        <input
+                          aria-label="Custom video height"
+                          className="inspector-field"
+                          type="number"
+                          min="16"
+                          max="7680"
+                          step="2"
+                          value={customVideoHeight}
+                          onChange={(event) =>
+                            setCustomVideoHeight(event.currentTarget.value)
+                          }
+                        />
+                      </>
+                    ) : null}
+                  </ToolDrawerRow>
+                  <ToolDrawerRow stacked>
+                    <button
+                      className="ui-btn"
+                      disabled={!activeProject}
+                      onClick={() => void exportProject()}
+                    >
+                      Project archive
+                    </button>
+                    <button
+                      className="ui-btn"
+                      disabled={!pair.original || !editorDocument}
+                      onClick={() => void exportFrame('png')}
+                    >
+                      PNG frame
+                    </button>
+                  </ToolDrawerRow>
+                </ToolDrawerSection>
+              </>
             )}
             {activeTool === 'settings' && (
               <ToolDrawerSection title="Project">
@@ -4682,17 +4743,10 @@ export function App() {
             )}
           </ToolDrawer>
 
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <div className="stage-preview">
             {original || cleaned ? (
               <div
-                style={{
-                  flex: 1,
-                  minHeight: 0,
-                  overflow: 'auto',
-                  border: '1px solid var(--ui-border)',
-                  borderRadius: 12,
-                  background: 'var(--ui-surface)',
-                }}
+                className="stage-canvas-card"
               >
                 <EditingWorkspace
                   original={

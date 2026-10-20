@@ -105,6 +105,16 @@ export function EditingWorkspace({
       readonly needsReview?: boolean;
       readonly kindHint?: string;
     }[];
+    readonly panels?: readonly {
+      readonly id: string;
+      readonly bounds: {
+        readonly x: number;
+        readonly y: number;
+        readonly width: number;
+        readonly height: number;
+      };
+      readonly label?: string;
+    }[];
     readonly confidences?: {
       readonly bubbleDetection: number;
       readonly textRegionDetection: number;
@@ -1220,18 +1230,18 @@ export function EditingWorkspace({
         id="comic-preview"
         className="comic-preview-panel"
       >
-        <div className="relative mx-auto w-fit max-w-full">
+        <div className="relative mx-auto h-full w-full overflow-hidden">
             <img
-              className="block max-h-[62vh] max-w-full select-none object-contain"
+              className="absolute inset-0 block h-full w-full select-none object-contain"
               src={image.src}
-              alt="Comic page canvas"
+              alt="Comic page preview"
               draggable={false}
             />
             <svg
               ref={svgRef}
               className="absolute inset-0 h-full w-full touch-none"
               viewBox={`0 0 ${space.dimensions.width} ${space.dimensions.height}`}
-              preserveAspectRatio="none"
+              preserveAspectRatio="xMidYMid meet"
               onPointerDown={startDrawing}
               onPointerMove={moveDrawing}
               onPointerUp={finishDrawing}
@@ -1240,6 +1250,35 @@ export function EditingWorkspace({
                 setDragEnd(null);
               }}
             >
+              {/* Detected page panels — structural preview of the comic layout. */}
+              {showDetection &&
+                analysis?.panels?.map((panel) => (
+                  <g key={`panel:${panel.id}`} pointerEvents="none">
+                    <rect
+                      x={panel.bounds.x}
+                      y={panel.bounds.y}
+                      width={panel.bounds.width}
+                      height={panel.bounds.height}
+                      fill="rgba(59,130,246,.06)"
+                      stroke="#3b82f6"
+                      strokeWidth={Math.max(space.dimensions.width / 500, 2)}
+                      strokeDasharray="10 6"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <text
+                      x={panel.bounds.x + 10}
+                      y={panel.bounds.y + Math.max(space.dimensions.width / 90, 18)}
+                      fill="#1d4ed8"
+                      fontSize={Math.max(space.dimensions.width / 110, 12)}
+                      stroke="white"
+                      strokeWidth={Math.max(space.dimensions.width / 700, 1)}
+                      paintOrder="stroke"
+                    >
+                      {panel.label ?? `Panel ${panel.id}`}
+                    </text>
+                    <title>{`Panel ${panel.id} · ${Math.round(panel.bounds.width)}×${Math.round(panel.bounds.height)}`}</title>
+                  </g>
+                ))}
               {Object.values(document.bubbles).map((bubble) => (
                 <g key={bubble.id}>
                   <polygon

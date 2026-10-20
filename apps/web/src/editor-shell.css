@@ -1,8 +1,48 @@
-/* CE.SDK-inspired editor shell (light + dark). Compact, technical, neutral. */
+/* CapCut-style editor shell (dark-first). Top export bar · left rail+library ·
+   center preview/player · right properties · full-width bottom timeline. */
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --ui-font: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --ui-bg: #0f1012;
+  --ui-surface: #1a1b1f;
+  --ui-surface-2: #222328;
+  --ui-surface-3: #2a2c32;
+  --ui-border: #2e3038;
+  --ui-border-strong: #3d404a;
+  --ui-text: #f2f3f5;
+  --ui-muted: #8b8f9a;
+  --ui-faint: #5c606c;
+  --ui-accent: #4c7dff;
+  --ui-accent-hover: #6b93ff;
+  --ui-accent-soft: #1e2a4d;
+  --ui-accent-ink: #ffffff;
+  --ui-danger: #ff5c6c;
+  --ui-success: #2fd48a;
+  --ui-radius-sm: 8px;
+  --ui-radius-md: 12px;
+  --ui-radius-lg: 16px;
+  --ui-toolbar-h: 52px;
+  --ui-rail-w: 72px;
+  --ui-library-w: 320px;
+  --ui-inspector-w: 300px;
+  --ui-player-h: 64px;
+  --ui-timeline-h: 280px;
+  --ui-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  --ui-clip-page: #2c3354;
+  --ui-clip-page-border: #5b6bb5;
+  --ui-clip-audio: #243c30;
+  --ui-clip-audio-border: #4f8a6a;
+  --ui-clip-caption: #3d3424;
+  --ui-clip-caption-border: #a88440;
+  --ui-playhead: #4c7dff;
+  --ui-selection: #4c7dff;
+  --ui-hover: rgba(255, 255, 255, 0.06);
+}
+
+/* Light theme remains available as CapCut-style “light mode”. */
+[data-theme='light'] {
+  color-scheme: light;
   --ui-bg: #f4f4f6;
   --ui-surface: #ffffff;
   --ui-surface-2: #f7f7f9;
@@ -12,19 +52,12 @@
   --ui-text: #1c1c22;
   --ui-muted: #6b6b78;
   --ui-faint: #9a9aa8;
-  --ui-accent: #4f6ef7;
-  --ui-accent-hover: #3d5ce5;
-  --ui-accent-soft: #e8ecfe;
+  --ui-accent: #4c7dff;
+  --ui-accent-hover: #3d6af0;
+  --ui-accent-soft: #e8eeff;
   --ui-accent-ink: #ffffff;
   --ui-danger: #d64545;
-  --ui-radius-sm: 8px;
-  --ui-radius-md: 12px;
-  --ui-radius-lg: 16px;
-  --ui-toolbar-h: 56px;
-  --ui-rail-w: 64px;
-  --ui-inspector-w: 360px;
-  --ui-timeline-h: 280px;
-  --ui-shadow: 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px rgba(16, 16, 24, 0.04);
+  --ui-success: #1a7f4b;
   --ui-clip-page: #d8dcf5;
   --ui-clip-page-border: #9aa6e8;
   --ui-clip-audio: #d9ebe0;
@@ -33,42 +66,18 @@
   --ui-clip-caption-border: #d2a85c;
   --ui-playhead: #3b5bfd;
   --ui-selection: #3b5bfd;
-}
-
-[data-theme='dark'] {
-  color-scheme: dark;
-  --ui-bg: #17181c;
-  --ui-surface: #202228;
-  --ui-surface-2: #26282f;
-  --ui-surface-3: #2e3138;
-  --ui-border: #34363f;
-  --ui-border-strong: #484b56;
-  --ui-text: #f0f1f5;
-  --ui-muted: #a0a3b0;
-  --ui-faint: #6c7080;
-  --ui-accent: #6b84ff;
-  --ui-accent-hover: #8298ff;
-  --ui-accent-soft: #2a3358;
-  --ui-accent-ink: #ffffff;
-  --ui-danger: #ff6b6b;
-  --ui-clip-page: #2c3354;
-  --ui-clip-page-border: #5b6bb5;
-  --ui-clip-audio: #243c30;
-  --ui-clip-audio-border: #4f8a6a;
-  --ui-clip-caption: #3d3424;
-  --ui-clip-caption-border: #a88440;
-  --ui-playhead: #6b84ff;
-  --ui-selection: #6b84ff;
+  --ui-hover: rgba(0, 0, 0, 0.04);
 }
 
 .editor-app {
   display: grid;
   grid-template-areas:
-    'toolbar toolbar toolbar'
-    'rail stage inspector'
-    'rail timeline inspector';
-  grid-template-columns: var(--ui-rail-w) minmax(0, 1fr) var(--ui-inspector-w);
-  grid-template-rows: var(--ui-toolbar-h) minmax(0, 1fr) auto;
+    'bar bar'
+    'tools tools'
+    'stage props'
+    'timeline timeline';
+  grid-template-columns: minmax(0, 1fr) var(--ui-inspector-w);
+  grid-template-rows: var(--ui-toolbar-h) auto minmax(0, 1fr) auto;
   height: 100vh;
   overflow: hidden;
   background: var(--ui-bg);
@@ -78,21 +87,21 @@
 }
 
 .editor-app[data-inspector='off'] {
-  grid-template-columns: var(--ui-rail-w) minmax(0, 1fr) 0;
+  grid-template-columns: minmax(0, 1fr) 0;
 }
 
 .editor-app[data-timeline='collapsed'] {
-  grid-template-rows: var(--ui-toolbar-h) minmax(0, 1fr) 40px;
+  grid-template-rows: var(--ui-toolbar-h) auto minmax(0, 1fr) 40px;
 }
 
-/* ── Top toolbar ─────────────────────────────────────────── */
+/* ── Top bar (CapCut: brand · title · Export) ─────────────── */
 .editor-toolbar {
-  grid-area: toolbar;
+  grid-area: bar;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 12px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface);
   z-index: 20;
@@ -233,64 +242,46 @@
   font-weight: 550;
 }
 
-/* ── Left tool rail ──────────────────────────────────────── */
-.editor-rail {
-  grid-area: rail;
+/* ── Horizontal tool row (CapCut-style; replaces vertical rail) ── */
+.tool-row {
+  grid-area: tools;
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
-  padding: 10px 8px;
-  border-right: 1px solid var(--ui-border);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface);
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   z-index: 15;
 }
 
-.rail-btn {
+.tool-row-btn {
   position: relative;
-  display: grid;
-  width: 40px;
-  height: 40px;
-  place-items: center;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   color: var(--ui-muted);
   cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.rail-btn:hover {
-  background: var(--ui-surface-2);
+.tool-row-btn:hover {
+  background: var(--ui-hover);
   color: var(--ui-text);
 }
 
-.rail-btn.active {
-  border-color: var(--ui-accent);
+.tool-row-btn.active {
   background: var(--ui-accent-soft);
   color: var(--ui-accent);
-}
-
-.rail-btn .tooltip {
-  pointer-events: none;
-  position: absolute;
-  left: calc(100% + 8px);
-  top: 50%;
-  z-index: 50;
-  transform: translateY(-50%);
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: var(--ui-text);
-  color: var(--ui-surface);
-  font-size: 11px;
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.rail-btn:hover .tooltip {
-  opacity: 1;
 }
 
 .rail-divider {
@@ -300,19 +291,99 @@
   background: var(--ui-border);
 }
 
-/* ── Stage / canvas ──────────────────────────────────────── */
+/* ── Preview stage (CapCut: library | preview | player) ───── */
 .editor-stage {
   grid-area: stage;
   position: relative;
-  display: flex;
+  display: grid;
   min-width: 0;
   min-height: 0;
+  grid-template-columns: var(--ui-library-w) minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) var(--ui-player-h);
+  grid-template-areas:
+    'hud hud'
+    'workflow workflow'
+    'stagebar stagebar'
+    'library preview'
+    'player player';
+  overflow: hidden;
+  background: var(--ui-bg);
+  gap: 0;
+}
+
+/* Flatten wrappers so CapCut grid regions apply to real panels. */
+.stage-flow,
+.stage-body {
+  display: contents;
+}
+
+.stage-hud {
+  grid-area: hud;
+}
+
+.workflow-bar {
+  grid-area: workflow;
+  margin: 8px 10px 0;
+  border-radius: 10px;
+}
+
+.stage-toolbar {
+  grid-area: stagebar;
+  margin: 8px 10px 0;
+}
+
+.canvas-bar:not(.stage-toolbar) {
+  /* message / error strips */
+  grid-column: 1 / -1;
+  margin: 8px 10px 0;
+}
+
+.tool-drawer {
+  grid-area: library;
+  border-right: 1px solid var(--ui-border);
+  border-bottom: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.stage-preview {
+  grid-area: preview;
+  min-width: 0;
+  min-height: 320px;
+  overflow: hidden;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 4px 10px 8px;
+}
+
+.stage-canvas-card {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  background: var(--ui-surface);
+}
+
+.editor-player {
+  grid-area: player;
+  display: flex;
   align-items: center;
   justify-content: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 6px 14px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-surface);
+}
+
+.editor-player .playback-bar {
+  flex-wrap: nowrap;
+  max-width: 100%;
   overflow: hidden;
-  background:
-    radial-gradient(circle at center, transparent 0, rgba(0, 0, 0, 0.03) 100%),
-    var(--ui-surface-3);
 }
 
 .editor-stage-inner {
@@ -371,22 +442,128 @@
 }
 
 .stage-hud {
-  position: absolute;
-  top: 12px;
-  left: 12px;
+  grid-area: hud;
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 6px 10px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--ui-surface) 92%, transparent);
+  padding: 6px 12px;
   color: var(--ui-muted);
   font-size: 11px;
-  backdrop-filter: blur(8px);
+  background: transparent;
+  border: 0;
 }
 
-/* Canvas bar — mirrors IMG.LY `ly.img.canvas.bar` (bottom). */
+/* Major draft-first workflow strip — always visible above the canvas. */
+.workflow-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow);
+}
+
+.workflow-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.workflow-step-li {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.workflow-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workflow-step:hover {
+  background: var(--ui-hover, rgba(0, 0, 0, 0.04));
+  color: inherit;
+}
+
+.workflow-step.is-active {
+  border-color: var(--ui-accent);
+  color: var(--ui-accent);
+  background: color-mix(in srgb, var(--ui-accent) 10%, transparent);
+}
+
+.workflow-step.is-done {
+  color: var(--ui-success, #1a7f4b);
+}
+
+.workflow-step.is-done .workflow-step-index {
+  background: var(--ui-success, #1a7f4b);
+  border-color: var(--ui-success, #1a7f4b);
+  color: #fff;
+}
+
+.workflow-step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--ui-border);
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 1;
+  background: var(--ui-surface);
+}
+
+.workflow-step-arrow {
+  color: var(--ui-muted);
+  font-size: 12px;
+  opacity: 0.55;
+  user-select: none;
+}
+
+.workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-draft-btn {
+  min-width: 120px;
+}
+
+.capcut-export {
+  min-width: 88px;
+  border-radius: 8px;
+  background: var(--ui-accent);
+  color: #fff;
+  font-weight: 650;
+}
+
+.capcut-export:hover:not(:disabled) {
+  background: var(--ui-accent-hover);
+}
+
+/* Canvas bar — slim transport + fit only (page tools live in drawers). */
 .canvas-bar {
   display: flex;
   flex-wrap: wrap;
@@ -435,18 +612,21 @@
   white-space: nowrap;
 }
 
-/* Left tool drawer — IMG.LY asset/panel dock. */
+/* Left library panel (CapCut media/text/audio library). */
 .tool-drawer {
+  grid-area: library;
   display: flex;
   flex-direction: column;
-  width: 280px;
+  width: 100%;
   max-height: 100%;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border: 0;
+  border-right: 1px solid var(--ui-border);
+  border-radius: 0;
   background: var(--ui-surface);
-  box-shadow: var(--ui-shadow);
+  box-shadow: none;
   overflow: hidden;
-  flex: 0 0 280px;
+  flex: 0 0 auto;
+  min-height: 0;
 }
 
 .tool-drawer-header {
@@ -538,9 +718,9 @@
   align-items: stretch;
 }
 
-/* ── Inspector ───────────────────────────────────────────── */
+/* ── Properties (CapCut right inspector) ─────────────────── */
 .editor-inspector {
-  grid-area: inspector;
+  grid-area: props;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -693,22 +873,42 @@
   border-color: var(--ui-accent);
 }
 
-/* ── Timeline ────────────────────────────────────────────── */
+/* ── Player bar (CapCut: transport under preview) ────────── */
+.editor-player {
+  grid-area: player;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 14px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-surface);
+}
+
+.editor-player .playback-bar {
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* ── Timeline (full width, CapCut multi-track) ───────────── */
 .editor-timeline {
   grid-area: timeline;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  margin: 0 10px 10px;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--ui-border);
+  border-radius: 0;
   background: var(--ui-surface);
-  box-shadow: var(--ui-shadow);
+  box-shadow: none;
   overflow: hidden;
 }
 
 .editor-timeline[data-collapsed='true'] {
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .timeline-resize {
@@ -1044,9 +1244,10 @@
   .editor-brand-text {
     display: none;
   }
-  .rail-btn {
-    width: 36px;
-    height: 36px;
+  .tool-row-btn {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 11px;
   }
   .timeline-header {
     gap: 4px;
