@@ -404,6 +404,11 @@ body {
   cursor: pointer;
 }
 
+.canvas-mode-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
 .canvas-mode-button:hover:not(:disabled) {
   border-color: var(--ui-accent);
   background: var(--ui-accent-soft) !important;

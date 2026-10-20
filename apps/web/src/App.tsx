@@ -8,7 +8,6 @@ import { EditorTimeline } from './EditorTimeline.js';
 import {
   IconAudio,
   IconBubble,
-  IconImage,
   IconLayers,
   IconOcr,
   IconPages,
@@ -3382,14 +3381,12 @@ export function App() {
         {(
           [
             ['pages', 'Pages', IconPages],
-            ['layers', 'Layers', IconLayers],
-            ['import', 'Import pages', IconUpload],
+            ['import', 'Import', IconUpload],
             ['audio', 'Narration', IconAudio],
-            ['media', 'Media', IconImage],
-            ['video', 'Composition', IconVideo],
+            ['ocr', 'Draft', IconOcr],
             ['captions', 'Captions', IconText],
             ['bubbles', 'Bubbles', IconBubble],
-            ['ocr', 'OCR / Detect', IconOcr],
+            ['video', 'Composition', IconVideo],
             ['export', 'Export', IconSave],
             ['settings', 'Settings', IconTheme],
           ] as const
@@ -3447,11 +3444,29 @@ export function App() {
             Fit
           </button>
           <button
+            className="ui-btn primary"
+            type="button"
+            disabled={
+              speechAutomationBusy ||
+              mp4Exporting ||
+              !audioSource?.blob ||
+              (!pair.original && !pair.cleaned)
+            }
+            onClick={() => {
+              setActiveTool('ocr');
+              setInspectorOpen(true);
+              void produceDraft();
+            }}
+            title="Map dialogue, fit typewriter captions, export draft MP4"
+          >
+            {mp4Exporting ? 'Exporting…' : 'Produce draft'}
+          </button>
+          <button
             className="ui-btn"
             type="button"
             onClick={() => void addEmptyPage()}
           >
-            + Add page
+            + Page
           </button>
           <button
             className="ui-btn"
@@ -3810,138 +3825,156 @@ export function App() {
               </ToolDrawerSection>
             )}
             {activeTool === 'ocr' && (
-              <ToolDrawerSection title="Detect">
-                <ToolDrawerRow>
-                  <button
-                    className="ui-btn primary"
-                    type="button"
-                    disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
-                    onClick={() => void detectBubbles()}
-                  >
-                    {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
-                  </button>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={!pair.original || pageAnalysisBusy}
-                    onClick={() => void analyzePage()}
-                  >
-                    Analyze page
-                  </button>
-                </ToolDrawerRow>
-                <ToolDrawerRow>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
-                    onClick={() => void extractText()}
-                  >
-                    Extract text
-                  </button>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
-                    onClick={() => void scanAndExtract()}
-                  >
-                    Scan + extract
-                  </button>
-                </ToolDrawerRow>
-                <ToolDrawerRow>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
-                    onClick={() => void retryEnhancedOCR()}
-                  >
-                    Enhanced OCR
-                  </button>
-                  <button
-                    className="ui-btn"
-                    type="button"
-                    disabled={speechAutomationBusy || !audioSource?.blob}
-                    onClick={() => void automateSpeech()}
-                  >
-                    {speechAutomationBusy ? 'Running…' : 'Auto everything'}
-                  </button>
-                  <button
-                    className="ui-btn primary"
-                    type="button"
-                    disabled={
-                      speechAutomationBusy ||
-                      mp4Exporting ||
-                      !audioSource?.blob ||
-                      (!pair.original && !pair.cleaned)
-                    }
-                    onClick={() => void produceDraft()}
-                    title="Map dialogue to bubbles, fit captions, and export a draft MP4"
-                  >
-                    {mp4Exporting ? 'Exporting…' : 'Produce draft'}
-                  </button>
-                </ToolDrawerRow>
-                <ToolDrawerRow>
-                  <label className="inspector-label">
-                    Reading order
-                    <select
-                      className="ui-select"
-                      value={readingDirection}
-                      onChange={(event) =>
-                        setReadingDirection(event.currentTarget.value as 'ltr' | 'rtl')
-                      }
-                    >
-                      <option value="ltr">LTR</option>
-                      <option value="rtl">RTL (manga)</option>
-                    </select>
-                  </label>
-                </ToolDrawerRow>
-                <ToolDrawerRow>
-                  <label className="inspector-label">
-                    Bubble proposals
-                    <select
-                      className="ui-select"
-                      value={bubbleProposalSource}
-                      onChange={(event) =>
-                        setBubbleProposalSource(
-                          event.target.value === 'ml' ? 'ml' : 'heuristic',
-                        )
-                      }
-                    >
-                      <option value="heuristic">Heuristic</option>
-                      <option value="ml">ML (YOLO)</option>
-                    </select>
-                  </label>
-                </ToolDrawerRow>
-                {ocrStatus ? (
-                  <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>{ocrStatus.message}</p>
-                ) : null}
-                {ocrMetrics ? (
-                  <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
-                    {ocrMetrics.detectedTextRegions} regions ·{' '}
-                    {Math.round(ocrMetrics.averageConfidence * 100)}% mean confidence
-                  </p>
-                ) : null}
-                {speechAutomationWarning ? (
-                  <p style={{ fontSize: 11, color: 'var(--ui-danger)' }}>
-                    {speechAutomationWarning}
-                  </p>
-                ) : null}
-                {ocrReviewItems.length > 0 ? (
-                  <p style={{ fontSize: 11, color: 'var(--ui-accent)' }}>
-                    OCR review queue · {ocrReviewItems.length}
-                  </p>
-                ) : null}
-                {alignment && original && textDebugUrl != null && (
+              <>
+                <ToolDrawerSection title="Draft" defaultOpen>
                   <ToolDrawerRow stacked>
-                    <TextDifferenceReview
-                      debugUrl={textDebugUrl}
-                      image={original}
-                      onDetect={() => void detectRemovedText()}
-                      regions={textRegions}
-                      running={textDetectionBusy}
-                    />
+                    <button
+                      className="ui-btn primary"
+                      type="button"
+                      disabled={
+                        speechAutomationBusy ||
+                        mp4Exporting ||
+                        !audioSource?.blob ||
+                        (!pair.original && !pair.cleaned)
+                      }
+                      onClick={() => void produceDraft()}
+                      title="Map dialogue to bubbles, fit captions, and export a draft MP4"
+                    >
+                      {mp4Exporting
+                        ? 'Exporting…'
+                        : speechAutomationBusy
+                          ? 'Mapping…'
+                          : 'Produce draft'}
+                    </button>
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)', margin: 0 }}>
+                      Map speech → bubbles → typewriter captions, then export.
+                      Fix with Reassign and Word cues afterward.
+                    </p>
                   </ToolDrawerRow>
-                )}
-              </ToolDrawerSection>
+                  {speechAutomationWarning ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-danger)' }}>
+                      {speechAutomationWarning}
+                    </p>
+                  ) : null}
+                  {ocrStatus ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
+                      {ocrStatus.message}
+                    </p>
+                  ) : null}
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Detection" defaultOpen={false}>
+                  <ToolDrawerRow>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={(!pair.original && !pair.cleaned) || pageAnalysisBusy}
+                      onClick={() => void detectBubbles()}
+                    >
+                      {pageAnalysisBusy ? 'Scanning…' : 'Detect bubbles'}
+                    </button>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={!pair.original || pageAnalysisBusy}
+                      onClick={() => void analyzePage()}
+                    >
+                      Analyze page
+                    </button>
+                  </ToolDrawerRow>
+                  <ToolDrawerRow>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                      onClick={() => void extractText()}
+                    >
+                      Extract text
+                    </button>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                      onClick={() => void scanAndExtract()}
+                    >
+                      Scan + extract
+                    </button>
+                  </ToolDrawerRow>
+                  <ToolDrawerRow>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={(!pair.original && !pair.cleaned) || ocrStatus?.phase === 'recognizing'}
+                      onClick={() => void retryEnhancedOCR()}
+                    >
+                      Enhanced OCR
+                    </button>
+                    <button
+                      className="ui-btn"
+                      type="button"
+                      disabled={speechAutomationBusy || !audioSource?.blob}
+                      onClick={() => void automateSpeech()}
+                    >
+                      {speechAutomationBusy ? 'Running…' : 'Map only'}
+                    </button>
+                  </ToolDrawerRow>
+                  {ocrMetrics ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-muted)' }}>
+                      {ocrMetrics.detectedTextRegions} regions ·{' '}
+                      {Math.round(ocrMetrics.averageConfidence * 100)}% mean confidence
+                    </p>
+                  ) : null}
+                  {ocrReviewItems.length > 0 ? (
+                    <p style={{ fontSize: 11, color: 'var(--ui-accent)' }}>
+                      OCR review queue · {ocrReviewItems.length}
+                    </p>
+                  ) : null}
+                  {alignment && original && textDebugUrl != null && (
+                    <ToolDrawerRow stacked>
+                      <TextDifferenceReview
+                        debugUrl={textDebugUrl}
+                        image={original}
+                        onDetect={() => void detectRemovedText()}
+                        regions={textRegions}
+                        running={textDetectionBusy}
+                      />
+                    </ToolDrawerRow>
+                  )}
+                </ToolDrawerSection>
+                <ToolDrawerSection title="Options" defaultOpen={false}>
+                  <ToolDrawerRow>
+                    <label className="inspector-label">
+                      Reading order
+                      <select
+                        className="ui-select"
+                        value={readingDirection}
+                        onChange={(event) =>
+                          setReadingDirection(event.currentTarget.value as 'ltr' | 'rtl')
+                        }
+                      >
+                        <option value="ltr">LTR</option>
+                        <option value="rtl">RTL (manga)</option>
+                      </select>
+                    </label>
+                  </ToolDrawerRow>
+                  <ToolDrawerRow>
+                    <label className="inspector-label">
+                      Bubble proposals
+                      <select
+                        className="ui-select"
+                        value={bubbleProposalSource}
+                        onChange={(event) =>
+                          setBubbleProposalSource(
+                            event.target.value === 'ml' ? 'ml' : 'heuristic',
+                          )
+                        }
+                      >
+                        <option value="heuristic">Heuristic</option>
+                        <option value="ml">ML (YOLO)</option>
+                      </select>
+                    </label>
+                  </ToolDrawerRow>
+                </ToolDrawerSection>
+              </>
             )}
             {activeTool === 'captions' && (
               <ToolDrawerSection title="Captions">
