@@ -92,10 +92,10 @@ describe('layered rendering primitives', () => {
       id: 'bubble-1' as BubbleId,
       polygon: {
         points: [
-          { x: 0, y: 0 },
-          { x: 16, y: 0 },
-          { x: 16, y: 16 },
-          { x: 0, y: 16 },
+          { x: 0, y: 0, coordinateSpace: space },
+          { x: 16, y: 0, coordinateSpace: space },
+          { x: 16, y: 16, coordinateSpace: space },
+          { x: 0, y: 16, coordinateSpace: space },
         ],
         coordinateSpace: space,
       },
