@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   activeCaptionsAt,
+  areProgressiveWordTimings,
   assignTokenSpans,
   captionRevealAt,
+  normalizeRevealTokens,
   type RevealToken,
 } from '@comic-captioner/core';
 
@@ -216,5 +218,78 @@ describe('helpers', () => {
     );
     expect(state.estimated).toBe(true);
     expect(state.tokens[0]!.estimated).toBe(true);
+  });
+});
+
+describe('normalizeRevealTokens — never dump a full line at cue start', () => {
+  const staggered: readonly RevealToken[] = [
+    { text: 'The', startSeconds: 1, endSeconds: 1.2 },
+    { text: 'city', startSeconds: 1.2, endSeconds: 1.4 },
+    { text: 'is', startSeconds: 1.4, endSeconds: 1.55 },
+    { text: 'under', startSeconds: 1.55, endSeconds: 1.75 },
+    { text: 'attack!', startSeconds: 1.75, endSeconds: 2 },
+  ];
+
+  it('accepts staggered acoustic timings', () => {
+    expect(areProgressiveWordTimings(staggered, 1, 2)).toBe(true);
+    expect(normalizeRevealTokens(staggered, SOURCE, 1, 2)).toBe(staggered);
+  });
+
+  it('rejects collapsed timings where every word starts at the cue', () => {
+    const collapsed = staggered.map((word) => ({
+      ...word,
+      startSeconds: 1,
+      endSeconds: 2,
+    }));
+    expect(areProgressiveWordTimings(collapsed, 1, 2)).toBe(false);
+    const normalized = normalizeRevealTokens(collapsed, SOURCE, 1, 2);
+    expect(normalized.every((token) => token.estimated)).toBe(true);
+    // Progressive: first token starts at cue start, last ends at cue end.
+    expect(normalized[0]!.startSeconds).toBe(1);
+    expect(normalized[normalized.length - 1]!.endSeconds).toBe(2);
+    expect(normalized[1]!.startSeconds).toBeGreaterThan(
+      normalized[0]!.startSeconds,
+    );
+  });
+
+  it('rejects non-monotonic and inverted spans', () => {
+    expect(
+      areProgressiveWordTimings(
+        [
+          { text: 'a', startSeconds: 1.5, endSeconds: 1.6 },
+          { text: 'b', startSeconds: 1.1, endSeconds: 1.2 },
+        ],
+        1,
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      areProgressiveWordTimings(
+        [{ text: 'a', startSeconds: 1.5, endSeconds: 1.2 }],
+        1,
+        2,
+      ),
+    ).toBe(false);
+  });
+
+  it('falls back to even slices when timings are missing', () => {
+    const tokens = normalizeRevealTokens(undefined, SOURCE, 1, 2);
+    expect(tokens).toHaveLength(5);
+    expect(tokens.every((token) => token.estimated)).toBe(true);
+  });
+
+  it('reveals only the first word at cue start after normalization', () => {
+    const collapsed = staggered.map((word) => ({
+      ...word,
+      startSeconds: 1,
+      endSeconds: 2,
+    }));
+    const tokens = normalizeRevealTokens(collapsed, SOURCE, 1, 2);
+    const atStart = captionRevealAt(tokens, 1.0);
+    expect(atStart.revealedTokenCount).toBe(1);
+    expect(atStart.visibleText).toBe('The');
+    const later = captionRevealAt(tokens, 1.5);
+    expect(later.revealedTokenCount).toBeGreaterThan(1);
+    expect(later.revealedTokenCount).toBeLessThan(5);
   });
 });

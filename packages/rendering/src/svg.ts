@@ -2,7 +2,7 @@ import type { CaptionLayout } from '@comic-captioner/core';
 import {
   activeCaptionsAt,
   captionRevealAt,
-  synthesizeRevealTokens,
+  normalizeRevealTokens,
   type BubbleReusePolicy,
   type CaptionRevealMode,
   type RevealToken,
@@ -91,9 +91,9 @@ export interface ExportWordTiming {
 /**
  * Convert export captions into timed layouts for progressive reveal.
  *
- * Real acoustic word timings are preferred; when they are missing or their
- * token count does not match the fitted layout, even slices across the cue
- * interval are synthesized so typewriter reveal still works offline.
+ * Real acoustic word timings are preferred only when they actually stagger
+ * across the cue. Collapsed or missing timings are replaced with even slices
+ * so a full sentence never dumps at the dialogue start.
  */
 export function timedCaptionLayoutsFromExport(
   captions: readonly {
@@ -117,18 +117,20 @@ export function timedCaptionLayoutsFromExport(
       .flatMap((line) => line.text.split(/\s+/))
       .filter((part) => part.length > 0);
     const provided = caption.words ?? [];
-    const words: readonly RevealToken[] =
+    const mapped: readonly RevealToken[] | undefined =
       provided.length === layoutWords.length && provided.length > 0
         ? provided.map((word, index) => ({
             text: layoutWords[index]!,
             startSeconds: word.start,
             endSeconds: word.end,
           }))
-        : synthesizeRevealTokens(
-            layoutWords.join(' '),
-            caption.start,
-            caption.end,
-          );
+        : undefined;
+    const words = normalizeRevealTokens(
+      mapped,
+      layoutWords.join(' '),
+      caption.start,
+      caption.end,
+    );
     result.push({
       layout: caption.layout,
       startSeconds: caption.start,
