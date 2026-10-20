@@ -577,6 +577,28 @@
   font-weight: 700;
 }
 
+.word-timing-editor {
+  width: 100%;
+}
+
+.word-timing-strip {
+  width: 100%;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 9.9%,
+      var(--ui-border) 10%
+    );
+  overflow: hidden;
+}
+
+.word-timing-strip [role='listitem']:hover {
+  filter: brightness(1.08);
+}
+
 .inspector-row {
   display: flex;
   align-items: center;
