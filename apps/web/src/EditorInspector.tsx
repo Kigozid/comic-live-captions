@@ -1,10 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef, useState } from 'react';
 import { IconClose, IconEye, IconLock } from './editor-icons.js';
-import {
-  inspectImglyFile,
-  type ImglySceneInspection,
-} from './imgly-scene.js';
 import { WorkspaceInspectorSlot } from './WorkspaceInspectorSlot.js';
 
 export type InspectorSelection =
@@ -127,11 +122,6 @@ export function EditorInspector({
   durationSeconds,
   fps,
 }: EditorInspectorProps) {
-  const [imglyResult, setImglyResult] = useState<ImglySceneInspection | null>(
-    null,
-  );
-  const [imglyError, setImglyError] = useState<string | null>(null);
-  const imglyInputRef = useRef<HTMLInputElement>(null);
   const title =
     selection.kind === 'none'
       ? 'Project'
@@ -219,75 +209,6 @@ export function EditorInspector({
                   Captions stay inside speech bubbles.
                 </span>
               </Row>
-            </Section>
-            <Section title="CE.SDK scene">
-              <Row label="Inspect .imgly">
-                <button
-                  className="ui-btn"
-                  type="button"
-                  onClick={() => imglyInputRef.current?.click()}
-                >
-                  Choose file…
-                </button>
-                <input
-                  ref={imglyInputRef}
-                  className="ui-sr"
-                  type="file"
-                  accept=".imgly,application/json"
-                  onChange={(event) => {
-                    const file = event.currentTarget.files?.[0];
-                    event.currentTarget.value = '';
-                    if (!file) return;
-                    setImglyError(null);
-                    void inspectImglyFile(file)
-                      .then(setImglyResult)
-                      .catch((cause: unknown) =>
-                        setImglyError(
-                          cause instanceof Error
-                            ? cause.message
-                            : 'Could not inspect scene file.',
-                        ),
-                      );
-                  }}
-                />
-              </Row>
-              {imglyError ? (
-                <p className="inspector-label" style={{ color: 'var(--ui-danger)' }}>
-                  {imglyError}
-                </p>
-              ) : null}
-              {imglyResult ? (
-                <div style={{ width: '100%', fontSize: 11, lineHeight: 1.45 }}>
-                  <Row label="Encoding">
-                    <Pill>{imglyResult.encodingGuess}</Pill>
-                  </Row>
-                  <Row label="Magic">
-                    <Pill>{imglyResult.magic ?? '—'}</Pill>
-                  </Row>
-                  <Row label="Bytes">
-                    <Pill>
-                      {imglyResult.byteLength} → {imglyResult.decodedByteLength}
-                    </Pill>
-                  </Row>
-                  <ul
-                    style={{
-                      margin: '8px 0 0',
-                      padding: '0 0 0 14px',
-                      color: 'var(--ui-muted)',
-                    }}
-                  >
-                    {imglyResult.notes.map((note) => (
-                      <li key={note}>{note}</li>
-                    ))}
-                  </ul>
-                  {!imglyResult.parseable ? (
-                    <p style={{ marginTop: 8, color: 'var(--ui-muted)' }}>
-                      Tracks/clips are not extracted without CE.SDK — sample ad
-                      content is never hard-coded into Comic Captioner.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
             </Section>
           </>
         )}
