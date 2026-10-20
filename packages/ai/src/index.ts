@@ -11,6 +11,7 @@ export type {
 } from './dialogue-mapping.js';
 export {
   AssistError,
+  AssistService,
   GeminiAssistProvider,
   GeminiAssistService,
 } from './gemini-assist.js';
@@ -22,6 +23,11 @@ export type {
   AssistTask,
   GeminiAssistProviderOptions,
 } from './gemini-assist.js';
+export {
+  MimoAssistProvider,
+  createMimoAssistProviderFromEnv,
+} from './mimo-assist.js';
+export type { MimoAssistProviderOptions } from './mimo-assist.js';
 
 export {
   GeminiTranscriptionError,

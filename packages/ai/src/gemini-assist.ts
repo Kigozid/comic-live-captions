@@ -42,7 +42,7 @@ export class AssistError extends Error {
 }
 
 /** Validates provider output and returns a reviewable proposal, never a state mutation. */
-export class GeminiAssistService {
+export class AssistService {
   constructor(private readonly provider: AssistProvider) {}
 
   async propose(
@@ -52,7 +52,7 @@ export class GeminiAssistService {
     validateInput(input);
     const raw = await this.provider.analyze(input, signal);
     if (!isObject(raw) || !isObject(raw.suggestion))
-      throw new AssistError('Gemini returned a malformed suggestion.');
+      throw new AssistError('Assist provider returned a malformed suggestion.');
     const confidence = raw.confidence;
     const rationale = raw.rationale;
     if (
@@ -84,6 +84,9 @@ export class GeminiAssistService {
     });
   }
 }
+
+/** @deprecated Use AssistService; kept for existing imports. */
+export class GeminiAssistService extends AssistService {}
 
 export interface GeminiAssistProviderOptions {
   readonly apiKey?: string;

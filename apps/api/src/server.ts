@@ -22,12 +22,14 @@ import {
 } from '@comic-captioner/image-engine';
 import {
   AssistError,
+  AssistService,
   DialogueMappingEngine,
   GeminiAssistProvider,
-  GeminiAssistService,
   GeminiTranscriptionError,
   GeminiTranscriptionProvider,
+  createMimoAssistProviderFromEnv,
   type AssistInput,
+  type AssistProvider,
 } from '@comic-captioner/ai';
 import type { BubbleDialogueReference } from '@comic-captioner/core';
 import {
@@ -1004,6 +1006,7 @@ async function handleRequest(
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
         transcriptionProvider: resolveTranscriptionProviderId(),
         ocrEngine: resolveOcrEngineId(),
+        assistProvider: resolveAssistProvider()?.providerId ?? null,
       },
     });
     return;
@@ -1235,11 +1238,13 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && request.url === '/api/assist') {
-    if (!process.env.GEMINI_API_KEY) {
+    const assistProvider = resolveAssistProvider();
+    if (!assistProvider) {
       sendJson(response, 503, {
         error: {
           code: 'ASSIST_NOT_CONFIGURED',
-          message: 'Server-side Gemini Assist is not configured.',
+          message:
+            'Server-side Assist is not configured. Set MIMO_API_KEY + MIMO_BASE_URL (and optional COMIC_LLM=mimo) or GEMINI_API_KEY.',
         },
       });
       return;
@@ -1254,9 +1259,10 @@ async function handleRequest(
         );
       const abortController = new AbortController();
       request.once('aborted', () => abortController.abort());
-      const proposal = await new GeminiAssistService(
-        new GeminiAssistProvider(),
-      ).propose(value, abortController.signal);
+      const proposal = await new AssistService(assistProvider).propose(
+        value,
+        abortController.signal,
+      );
       sendJson(response, 200, { proposal });
     } catch (error) {
       const status =
@@ -1272,9 +1278,9 @@ async function handleRequest(
               ? error.code
               : error instanceof AssistError
                 ? 'ASSIST_INVALID'
-                : 'GEMINI_FAILED',
+                : 'ASSIST_FAILED',
           message:
-            error instanceof Error ? error.message : 'Gemini Assist failed.',
+            error instanceof Error ? error.message : 'Assist failed.',
         },
       });
     }
@@ -2240,15 +2246,70 @@ async function handleRequest(
         readingOrder,
         transcriptSegments,
       });
+      // Optional semantic assist (MiMo): fill low-confidence / unmapped turns.
+      // Proposals stay reviewable — confidence is clamped below auto-approve.
+      const assistProvider = resolveAssistProvider();
+      const effectiveMappings = await Promise.all(
+        mappingResult.mappings.map(async (mapping) => {
+          if (mapping.bubbleId || !assistProvider) return mapping;
+          const segment = transcriptSegments.find(
+            (item) => item.id === mapping.transcriptSegmentId,
+          );
+          const candidateBubbleIds =
+            mapping.alternatives.length > 0
+              ? mapping.alternatives.map((candidate) => candidate.bubbleId)
+              : readingOrder;
+          if (!segment || candidateBubbleIds.length === 0) return mapping;
+          try {
+            const proposal = await new AssistService(assistProvider).propose(
+              {
+                task: 'dialogue-mapping',
+                targetId: segment.id,
+                context: {
+                  candidateBubbleIds,
+                  transcriptText: segment.text,
+                  bubbleTexts: references
+                    .filter((reference) =>
+                      candidateBubbleIds.includes(reference.bubbleId),
+                    )
+                    .map((reference) => ({
+                      bubbleId: reference.bubbleId,
+                      originalText: reference.originalText,
+                    })),
+                  readingOrder: candidateBubbleIds,
+                },
+              },
+            );
+            const suggested =
+              proposal.suggestion && typeof proposal.suggestion === 'object'
+                ? (proposal.suggestion as { bubbleId?: string }).bubbleId
+                : undefined;
+            if (!suggested || !candidateBubbleIds.includes(suggested as never)) {
+              return mapping;
+            }
+            return {
+              ...mapping,
+              bubbleId: suggested as typeof mapping.bubbleId,
+              confidence: Math.min(mapping.confidence, 0.72),
+              reviewFlag: 'low-confidence' as const,
+            };
+          } catch {
+            return mapping;
+          }
+        }),
+      );
       const font = automationFontMetrics();
       const matches = await Promise.all(
-        mappingResult.mappings.map(async (mapping) => {
+        effectiveMappings.map(async (mapping) => {
           const segment = transcriptSegments.find(
             (item) => item.id === mapping.transcriptSegmentId,
           )!;
-          const candidateBubbleIds = mapping.alternatives.map(
-            (candidate) => candidate.bubbleId,
-          );
+          const candidateBubbleIds = [
+            ...new Set([
+              ...mapping.alternatives.map((candidate) => candidate.bubbleId),
+              ...(mapping.bubbleId ? [mapping.bubbleId] : []),
+            ]),
+          ];
           const candidateLayouts = await Promise.all(
             candidateBubbleIds.map(async (bubbleId) => {
               const reference = references.find(
@@ -3051,6 +3112,23 @@ function isAssistInput(value: unknown): value is AssistInput {
     typeof candidate.context === 'object' &&
     !Array.isArray(candidate.context)
   );
+}
+
+/**
+ * Assist provider selection: MiMo (OpenAI-compatible) when configured,
+ * otherwise Gemini. Deterministic mapping still runs first; this is for
+ * reviewable semantic proposals only.
+ */
+function resolveAssistProvider(): AssistProvider | null {
+  const llm = (process.env.COMIC_LLM ?? '').toLowerCase();
+  const mimo = createMimoAssistProviderFromEnv();
+  const mimoReady = mimo.configured;
+  const geminiReady = Boolean(process.env.GEMINI_API_KEY);
+  if (llm === 'mimo' || (mimoReady && llm !== 'gemini')) {
+    return mimoReady ? mimo : null;
+  }
+  if (geminiReady) return new GeminiAssistProvider();
+  return mimoReady ? mimo : null;
 }
 
 export function startApiServer(port = Number(process.env.API_PORT ?? 3039)) {

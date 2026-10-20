@@ -88,6 +88,24 @@ the key there. The local `.env` is ignored by Git; never add credentials to the
 web app or a checked-in file. Optional model names can be set in that same API
 environment file.
 
+### MiMo / OpenAI-compatible Assist
+
+Optional LLM assist (dialogue mapping, OCR correction, bubble classification)
+can use a MiMo or other OpenAI-compatible chat API instead of Gemini:
+
+```sh
+# apps/api/.env
+COMIC_LLM=mimo
+MIMO_API_KEY=…
+MIMO_BASE_URL=https://your-mimo-endpoint.example/v1
+MIMO_ASSIST_MODEL=mimo
+```
+
+`POST /api/assist` prefers MiMo when configured (`COMIC_LLM=mimo` or MiMo env
+without forcing Gemini). `POST /api/automate-speech` uses the same provider to
+suggest bubble IDs for unmapped dialogue turns; suggestions are schema-checked,
+confidence-capped for review, and never auto-applied to project state.
+
 ## Checks
 
 ```sh
