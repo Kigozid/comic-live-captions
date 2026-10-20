@@ -4,6 +4,7 @@ import {
   areProgressiveWordTimings,
   assignTokenSpans,
   captionRevealAt,
+  chunkRevealTokens,
   normalizeRevealTokens,
   type RevealToken,
 } from '@comic-captioner/core';
@@ -20,9 +21,12 @@ function attackWords(): readonly RevealToken[] {
   ]);
 }
 
-describe('captionRevealAt — word-by-word (default)', () => {
+describe('captionRevealAt — word-by-word', () => {
   it('1. keeps the bubble empty before the dialogue starts', () => {
-    const state = captionRevealAt(attackWords(), -0.5, { sourceText: SOURCE });
+    const state = captionRevealAt(attackWords(), -0.5, {
+      sourceText: SOURCE,
+      mode: 'word-by-word',
+    });
     expect(state.isEmpty).toBe(true);
     expect(state.visibleText).toBe('');
     expect(state.revealedTokenCount).toBe(0);
@@ -30,36 +34,40 @@ describe('captionRevealAt — word-by-word (default)', () => {
   });
 
   it('2. reveals only the first word at its timestamp', () => {
-    const state = captionRevealAt(attackWords(), 0.0, { sourceText: SOURCE });
+    const state = captionRevealAt(attackWords(), 0.0, {
+      sourceText: SOURCE,
+      mode: 'word-by-word',
+    });
     expect(state.visibleText).toBe('The');
     expect(state.revealedTokenCount).toBe(1);
   });
 
   it('3. reveals additional words progressively', () => {
     const words = attackWords();
-    expect(captionRevealAt(words, 0.3, { sourceText: SOURCE }).visibleText).toBe(
-      'The city',
-    );
-    expect(captionRevealAt(words, 0.7, { sourceText: SOURCE }).visibleText).toBe(
+    const opts = { sourceText: SOURCE, mode: 'word-by-word' as const };
+    expect(captionRevealAt(words, 0.3, opts).visibleText).toBe('The city');
+    expect(captionRevealAt(words, 0.7, opts).visibleText).toBe(
       'The city is under',
     );
-    expect(captionRevealAt(words, 1.2, { sourceText: SOURCE }).visibleText).toBe(
-      SOURCE,
-    );
+    expect(captionRevealAt(words, 1.2, opts).visibleText).toBe(SOURCE);
   });
 
   it('4. preserves punctuation and original spacing', () => {
     const words = attackWords();
-    const state = captionRevealAt(words, 1.2, { sourceText: SOURCE });
+    const opts = { sourceText: SOURCE, mode: 'word-by-word' as const };
+    const state = captionRevealAt(words, 1.2, opts);
     expect(state.visibleText).toBe('The city is under attack!');
     // Partial step keeps the trailing space out of the revealed prefix.
-    const mid = captionRevealAt(words, 0.3, { sourceText: SOURCE });
+    const mid = captionRevealAt(words, 0.3, opts);
     expect(mid.visibleText).toBe('The city');
     expect(mid.visibleText.startsWith('The city is')).toBe(false);
   });
 
   it('marks the spoken word active for karaoke and keeps others inactive', () => {
-    const state = captionRevealAt(attackWords(), 0.3, { sourceText: SOURCE });
+    const state = captionRevealAt(attackWords(), 0.3, {
+      sourceText: SOURCE,
+      mode: 'word-by-word',
+    });
     expect(state.activeTokenIndex).toBe(1);
     expect(state.tokens.filter((t) => t.active)).toHaveLength(1);
     expect(state.tokens[1]!.active).toBe(true);
@@ -68,21 +76,80 @@ describe('captionRevealAt — word-by-word (default)', () => {
 
   it('reports finished only after the last word ends', () => {
     const words = attackWords();
-    expect(captionRevealAt(words, 1.29, { sourceText: SOURCE }).finished).toBe(
-      false,
-    );
-    expect(captionRevealAt(words, 1.3, { sourceText: SOURCE }).finished).toBe(
-      true,
-    );
+    const opts = { sourceText: SOURCE, mode: 'word-by-word' as const };
+    expect(captionRevealAt(words, 1.29, opts).finished).toBe(false);
+    expect(captionRevealAt(words, 1.3, opts).finished).toBe(true);
+  });
+});
+
+describe('captionRevealAt — smooth-phrase (default bubble subtitles)', () => {
+  it('chunks 2–3 words and never splits a word', () => {
+    const chunks = chunkRevealTokens(attackWords());
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(chunks.length).toBeLessThanOrEqual(3);
+    for (const chunk of chunks) {
+      const count = chunk.endTokenIndex - chunk.startTokenIndex + 1;
+      expect(count).toBeGreaterThanOrEqual(1);
+      expect(count).toBeLessThanOrEqual(3);
+    }
+    // "attack!" stays whole as the final chunk.
+    const last = chunks[chunks.length - 1]!;
+    expect(attackWords()[last.endTokenIndex]!.text).toBe('attack!');
+  });
+
+  it('reveals readable chunks instead of a typewriter word stream', () => {
+    const words = attackWords();
+    const opts = { sourceText: SOURCE, mode: 'smooth-phrase' as const };
+    // First chunk is 2–3 words at t=0, not a single word.
+    const atStart = captionRevealAt(words, 0.05, opts);
+    expect(atStart.revealedTokenCount).toBeGreaterThanOrEqual(2);
+    expect(atStart.revealedTokenCount).toBeLessThanOrEqual(3);
+    // Still progressive — not the full sentence immediately.
+    expect(atStart.visibleText).not.toBe(SOURCE);
+    // Later another chunk appears; full text after the last word.
+    expect(captionRevealAt(words, 1.4, opts).visibleText).toBe(SOURCE);
+  });
+
+  it('fades chunk opacity quickly without a typewriter cursor', () => {
+    const words = attackWords();
+    const state = captionRevealAt(words, 0.01, {
+      sourceText: SOURCE,
+      mode: 'smooth-phrase',
+    });
+    const shown = state.tokens.filter((token) => token.opacity > 0);
+    expect(shown.length).toBeGreaterThanOrEqual(2);
+    // Mid-fade opacity is between 0 and 1; no partial letters.
+    for (const token of state.tokens) {
+      expect(token.opacity).toBeGreaterThanOrEqual(0);
+      expect(token.opacity).toBeLessThanOrEqual(1);
+      expect(token.text === '' || token.text === token.token.text).toBe(true);
+    }
+  });
+
+  it('ends chunks at punctuation and pauses', () => {
+    const timed = assignTokenSpans('Hello, world. Wait! Okay then', [
+      { text: 'Hello,', startSeconds: 0, endSeconds: 0.2 },
+      { text: 'world.', startSeconds: 0.2, endSeconds: 0.4 },
+      { text: 'Wait!', startSeconds: 0.6, endSeconds: 0.8 },
+      { text: 'Okay', startSeconds: 0.8, endSeconds: 0.95 },
+      { text: 'then', startSeconds: 0.95, endSeconds: 1.1 },
+    ]);
+    const chunks = chunkRevealTokens(timed);
+    // Hello, world. | Wait! | Okay then  — pause + punctuation boundaries.
+    expect(chunks).toHaveLength(3);
+    expect(chunks[0]!.endTokenIndex).toBe(1);
+    expect(chunks[1]!.endTokenIndex).toBe(2);
+    expect(chunks[2]!.startTokenIndex).toBe(3);
   });
 });
 
 describe('captionRevealAt — determinism & seeking', () => {
   it('8. is a pure function of time (seek back/forward reproduces state)', () => {
     const words = attackWords();
-    const first = captionRevealAt(words, 0.7, { sourceText: SOURCE });
-    const later = captionRevealAt(words, 1.2, { sourceText: SOURCE });
-    const backAgain = captionRevealAt(words, 0.7, { sourceText: SOURCE });
+    const opts = { sourceText: SOURCE, mode: 'word-by-word' as const };
+    const first = captionRevealAt(words, 0.7, opts);
+    const later = captionRevealAt(words, 1.2, opts);
+    const backAgain = captionRevealAt(words, 0.7, opts);
     expect(backAgain).toEqual(first);
     expect(later.visibleText).not.toBe(first.visibleText);
   });
@@ -285,10 +352,10 @@ describe('normalizeRevealTokens — never dump a full line at cue start', () => 
       endSeconds: 2,
     }));
     const tokens = normalizeRevealTokens(collapsed, SOURCE, 1, 2);
-    const atStart = captionRevealAt(tokens, 1.0);
+    const atStart = captionRevealAt(tokens, 1.0, { mode: 'word-by-word' });
     expect(atStart.revealedTokenCount).toBe(1);
     expect(atStart.visibleText).toBe('The');
-    const later = captionRevealAt(tokens, 1.5);
+    const later = captionRevealAt(tokens, 1.5, { mode: 'word-by-word' });
     expect(later.revealedTokenCount).toBeGreaterThan(1);
     expect(later.revealedTokenCount).toBeLessThan(5);
   });

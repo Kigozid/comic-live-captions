@@ -157,6 +157,7 @@ function splitWords(text: string): string[] {
  * reveal to the deterministic engine so a given timestamp always renders the
  * same words; inactive bubbles stay empty and finished lines persist per the
  * reuse policy. Hidden words keep their full width so the layout never jumps.
+ * Default `smooth-phrase` shows 2–3 word chunks with a quick fade.
  */
 export function renderTimedCaptionLayerSvg(
   width: number,
@@ -168,7 +169,7 @@ export function renderTimedCaptionLayerSvg(
   assertDimensions(width, height);
   if (!Number.isFinite(timeSeconds))
     throw new RangeError('Caption reveal requires a finite playback time.');
-  const mode = options.revealMode ?? 'word-by-word';
+  const mode = options.revealMode ?? 'smooth-phrase';
   const karaokeColor = options.karaokeColor ?? '#7c3aed';
   const activeRefs = activeCaptionsAt(
     captions.map((caption) => ({
@@ -223,12 +224,19 @@ export function renderTimedCaptionLayerSvg(
               const state = reveal.tokens[baseIndex + k];
               const isActive = state?.active === true;
               const content = charMode ? (state?.text ?? '') : word;
-              const shown = charMode
-                ? content.length > 0
-                : state?.revealed === true;
+              // Smooth-phrase fades whole chunks; other modes snap 0/1.
+              const opacity =
+                state == null
+                  ? 0
+                  : charMode
+                    ? state.text.length > 0
+                      ? 1
+                      : 0
+                    : state.opacity;
+              const shown = opacity > 0;
               const fill = isActive ? ` fill="${escapeXml(karaokeColor)}"` : '';
               const trailing = k < words.length - 1 ? ' ' : '';
-              return `<tspan fill-opacity="${shown ? 1 : 0}"${fill}>${escapeXml(content)}${trailing}</tspan>`;
+              return `<tspan fill-opacity="${shown ? String(Math.round(opacity * 1000) / 1000) : 0}"${fill}>${escapeXml(content)}${trailing}</tspan>`;
             })
             .join('');
           return `<text x="${number(

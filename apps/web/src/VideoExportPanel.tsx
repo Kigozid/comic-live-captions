@@ -79,7 +79,7 @@ export function VideoExportPanel({
   const [sequenceMode, setSequenceMode] =
     useState<SequenceMode>('panel-sequence');
   const [revealMode, setRevealMode] =
-    useState<VideoExportStyleOptions['revealMode']>('word-by-word');
+    useState<VideoExportStyleOptions['revealMode']>('smooth-phrase');
   const [karaoke, setKaraoke] = useState(false);
   const [wordEmphasis, setWordEmphasis] = useState(false);
   const [bubbleReusePolicy, setBubbleReusePolicy] =
@@ -459,10 +459,11 @@ export function VideoExportPanel({
             )
           }
         >
-          <option value="phrase">Captions · phrase</option>
-          <option value="word-by-word">Captions · word-by-word</option>
+          <option value="smooth-phrase">Smooth phrase (default)</option>
+          <option value="word-by-word">Word-by-word</option>
+          <option value="phrase">Full sentence</option>
           <option value="character-by-character">
-            Captions · typewriter (per character)
+            Character-by-character
           </option>
         </select>
         <select

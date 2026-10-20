@@ -1,29 +1,42 @@
 /**
  * Deterministic caption reveal engine.
  *
- * Single source of truth for progressive (word-by-word / character) caption
- * reveal shared by the live preview and every export path (browser SVG frames
- * and the Remotion composer). The reveal state is a pure function of playback
- * time, so the same timestamp always produces the same visible text — under
- * playback, pause, seeking, replay, and frame-accurate export alike.
+ * Single source of truth for progressive caption reveal shared by the live
+ * preview and every export path (browser SVG frames and the Remotion
+ * composer). The reveal state is a pure function of playback time, so the
+ * same timestamp always produces the same visible text — under playback,
+ * pause, seeking, replay, and frame-accurate export alike.
+ *
+ * Default `smooth-phrase` shows readable 2–3 word chunks with a quick fade —
+ * natural speech-bubble subtitles. `word-by-word` and `character-by-character`
+ * remain available; `phrase` dumps the full sentence at dialogue start.
  *
  * Design rules enforced here (mirroring the product spec):
  *  - A bubble is empty before its dialogue starts.
- *  - Words appear as they are spoken; earlier words stay visible.
- *  - Punctuation and original spacing are preserved.
+ *  - Chunks/words appear as they are spoken; earlier text stays visible.
+ *  - Punctuation and original spacing are preserved; words are never split.
  *  - Future dialogue is never revealed early; overlapping captions are
  *    independent.
  *  - Completed dialogue persists according to an explicit bubble-reuse policy.
+ *  - Layout is computed from the full sentence; reveal only paints a prefix.
  */
 
 /** How the caption text is progressively revealed. */
 export type CaptionRevealMode =
+  | 'smooth-phrase'
   | 'phrase'
   | 'word-by-word'
   | 'character-by-character';
 
 /** What a bubble shows when it is reused by a later caption. */
 export type BubbleReusePolicy = 'retain' | 'replace' | 'clear';
+
+/** Target words per smooth-phrase chunk (readable speech-bubble subtitles). */
+export const SMOOTH_PHRASE_MAX_WORDS = 3;
+/** Pause length (seconds) that ends a smooth-phrase chunk. */
+export const SMOOTH_PHRASE_PAUSE_SECONDS = 0.12;
+/** Quick opacity ramp when a chunk appears (no typewriter cursor). */
+export const SMOOTH_PHRASE_FADE_SECONDS = 0.09;
 
 /**
  * A timed text token. `text` keeps its own punctuation (e.g. `"attack!"`).
@@ -43,7 +56,7 @@ export interface RevealToken {
 }
 
 export interface CaptionRevealOptions {
-  /** Default: `word-by-word`. */
+  /** Default: `smooth-phrase` (2–3 word readable chunks). */
   readonly mode?: CaptionRevealMode | undefined;
   /**
    * Full caption text. When provided together with per-token `charEnd`, the
@@ -62,6 +75,11 @@ export interface RevealTokenState {
   readonly active: boolean;
   /** Fraction of the token revealed in [0, 1]; 1 once fully revealed. */
   readonly progress: number;
+  /**
+   * Paint opacity for a soft chunk fade (1 = solid). Smooth-phrase ramps this
+   * over `SMOOTH_PHRASE_FADE_SECONDS`; other modes are 0/1.
+   */
+  readonly opacity: number;
   /** The substring of the token currently shown (empty when not revealed). */
   readonly text: string;
   readonly estimated: boolean;
@@ -98,12 +116,84 @@ function clamp01(value: number): number {
 }
 
 /**
+ * One smooth-phrase chunk: a contiguous run of whole words.
+ * Never splits a word. Boundaries respect punctuation and pauses.
+ */
+export interface PhraseChunk {
+  readonly startTokenIndex: number;
+  readonly endTokenIndex: number;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+}
+
+function endsPhrase(token: RevealToken): boolean {
+  return /[.!?…;:]["')\]]?$/.test(token.text.trim());
+}
+
+/**
+ * Group timed words into readable 2–3 word chunks for speech-bubble subtitles.
+ *
+ * Closes a chunk when it already has `maxWords` words, after punctuation, or
+ * when a spoken pause before the next word exceeds `pauseSeconds`. Whole
+ * words only — tokens are never split.
+ */
+export function chunkRevealTokens(
+  tokens: readonly RevealToken[],
+  options: {
+    readonly maxWords?: number;
+    readonly pauseSeconds?: number;
+  } = {},
+): readonly PhraseChunk[] {
+  const maxWords = Math.max(1, options.maxWords ?? SMOOTH_PHRASE_MAX_WORDS);
+  const pauseSeconds = options.pauseSeconds ?? SMOOTH_PHRASE_PAUSE_SECONDS;
+  const chunks: PhraseChunk[] = [];
+  if (tokens.length === 0) return chunks;
+
+  let start = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const next = index + 1 < tokens.length ? tokens[index + 1] : null;
+    const count = index - start + 1;
+    const pauseBeforeNext = next
+      ? next.startSeconds - token.endSeconds
+      : Infinity;
+    const shouldClose =
+      index === tokens.length - 1 ||
+      count >= maxWords ||
+      endsPhrase(token) ||
+      pauseBeforeNext >= pauseSeconds;
+    if (shouldClose) {
+      chunks.push({
+        startTokenIndex: start,
+        endTokenIndex: index,
+        startSeconds: tokens[start]!.startSeconds,
+        endSeconds: token.endSeconds,
+      });
+      start = index + 1;
+    }
+  }
+  return chunks;
+}
+
+function chunkStartForToken(
+  chunks: readonly PhraseChunk[],
+  tokenIndex: number,
+): number {
+  for (const chunk of chunks) {
+    if (tokenIndex >= chunk.startTokenIndex && tokenIndex <= chunk.endTokenIndex)
+      return chunk.startSeconds;
+  }
+  return Infinity;
+}
+
+/**
  * Deterministic reveal state for one caption at `timeSeconds`.
  *
- * Word-by-word (default) reveals each whole token the instant its start time is
- * reached. Character mode fills a token across its `[start, end)` interval so it
- * is complete by the spoken word's end. Phrase mode shows the whole caption at
- * the caption's first token start.
+ * - `smooth-phrase` (default): 2–3 word chunks appear together with a quick
+ *   fade — natural in-bubble subtitles, no typewriter cursor.
+ * - `word-by-word`: each token at its start time.
+ * - `phrase`: entire caption at the first token start (legacy).
+ * - `character-by-character`: fill across each token's spoken interval.
  */
 export function captionRevealAt(
   tokens: readonly RevealToken[],
@@ -111,7 +201,7 @@ export function captionRevealAt(
   options: CaptionRevealOptions = {},
 ): CaptionRevealState {
   assertFiniteTime(timeSeconds);
-  const mode: CaptionRevealMode = options.mode ?? 'word-by-word';
+  const mode: CaptionRevealMode = options.mode ?? 'smooth-phrase';
   const sourceText = options.sourceText;
   const hasSpans =
     typeof sourceText === 'string' &&
@@ -133,19 +223,41 @@ export function captionRevealAt(
     }
   }
 
+  const chunks =
+    mode === 'smooth-phrase' ? chunkRevealTokens(tokens) : [];
+  const fade = Math.max(0.001, SMOOTH_PHRASE_FADE_SECONDS);
+
   const tokenStates: RevealTokenState[] = tokens.map((token, index) => {
     const span = token.endSeconds - token.startSeconds;
     const estimated = token.estimated === true;
     let progress: number;
+    let opacity: number;
     if (mode === 'phrase') {
       progress = timeSeconds >= phraseStart ? 1 : 0;
+      opacity = progress;
+    } else if (mode === 'smooth-phrase') {
+      const chunkStart = chunkStartForToken(chunks, index);
+      if (timeSeconds < chunkStart) {
+        progress = 0;
+        opacity = 0;
+      } else {
+        // Whole words only: once the chunk starts, text is fully present and
+        // opacity ramps quickly so the group fades in instead of popping.
+        progress = 1;
+        opacity = clamp01((timeSeconds - chunkStart) / fade);
+      }
     } else if (mode === 'word-by-word') {
       progress = timeSeconds >= token.startSeconds ? 1 : 0;
+      opacity = progress;
     } else {
       // character-by-character: fill across the token's spoken interval.
       if (timeSeconds < token.startSeconds) progress = 0;
       else if (timeSeconds >= token.endSeconds) progress = 1;
-      else progress = span > 0 ? clamp01((timeSeconds - token.startSeconds) / span) : 1;
+      else
+        progress = span > 0
+          ? clamp01((timeSeconds - token.startSeconds) / span)
+          : 1;
+      opacity = progress > 0 ? 1 : 0;
     }
     const revealed = progress >= 1;
     const text = revealed
@@ -159,6 +271,7 @@ export function captionRevealAt(
       revealed,
       active: index === activeTokenIndex,
       progress,
+      opacity,
       text,
       estimated,
     };

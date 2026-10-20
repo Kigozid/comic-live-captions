@@ -18,7 +18,7 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyleSettings = Object.freeze({
   strokeWidthPx: 2,
   lineSpacingPx: 6,
   safeMarginPx: 8,
-  revealMode: 'word-by-word' as const,
+  revealMode: 'smooth-phrase' as const,
   karaoke: false,
   wordEmphasis: false,
   fadeInSeconds: 0.12,

@@ -1055,7 +1055,7 @@ export function EditingWorkspace({
           aria-pressed={liveCaptions}
           onClick={() => setLiveCaptions((on) => !on)}
           type="button"
-          title="Preview live word-by-word captions synced to the audio clock"
+          title="Preview smooth in-bubble captions synced to the audio clock"
         >
           {liveCaptions ? 'Live captions' : 'Live captions off'}
         </button>
@@ -1423,7 +1423,7 @@ export function EditingWorkspace({
                 );
                 const reveal = liveCaptions
                   ? captionRevealAt(tokens, previewTime, {
-                      mode: 'word-by-word',
+                      mode: 'smooth-phrase',
                     })
                   : null;
                 if (liveCaptions && !reveal?.started) return null;
@@ -1477,7 +1477,7 @@ export function EditingWorkspace({
                           return (
                             <tspan
                               key={index}
-                              fillOpacity={state?.revealed ? 1 : 0}
+                              fillOpacity={state?.opacity ?? 0}
                               fill={state?.active ? '#7c3aed' : undefined}
                             >
                               {word}
