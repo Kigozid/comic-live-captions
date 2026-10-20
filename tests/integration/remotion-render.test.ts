@@ -149,7 +149,8 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
     while (Date.now() < deadline) {
       current = getVideoExportJob(job.id);
       if (
-        current.status === 'succeeded' ||
+        current.status === 'completed' ||
+          current.status === 'succeeded' ||
         current.status === 'failed' ||
         current.status === 'cancelled'
       ) {
@@ -158,7 +159,7 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    if (current.status !== 'succeeded') {
+    if (current.status !== 'completed' && current.status !== 'succeeded') {
       throw new VideoExportError(
         'RENDER_FAILED',
         `Sample render did not succeed (status=${current.status}, error=${current.error?.message ?? 'none'})`,
@@ -264,6 +265,7 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
       while (Date.now() < deadline) {
         current = getVideoExportJob(job.id);
         if (
+          current.status === 'completed' ||
           current.status === 'succeeded' ||
           current.status === 'failed' ||
           current.status === 'cancelled'
@@ -272,7 +274,7 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      if (current.status !== 'succeeded') {
+      if (current.status !== 'completed' && current.status !== 'succeeded') {
         throw new VideoExportError(
           'RENDER_FAILED',
           `Panel sequence render did not succeed (status=${current.status}, error=${current.error?.message ?? 'none'})`,
@@ -407,6 +409,7 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
       while (Date.now() < deadline) {
         current = getVideoExportJob(job.id);
         if (
+          current.status === 'completed' ||
           current.status === 'succeeded' ||
           current.status === 'failed' ||
           current.status === 'cancelled'
@@ -415,7 +418,7 @@ describe.runIf(RUN_RENDERS)('Remotion sample MP4 render', () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      if (current.status !== 'succeeded') {
+      if (current.status !== 'completed' && current.status !== 'succeeded') {
         throw new VideoExportError(
           'RENDER_FAILED',
           `Multi-page render did not succeed (status=${current.status}, error=${current.error?.message ?? 'none'})`,

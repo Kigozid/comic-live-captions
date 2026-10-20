@@ -2303,11 +2303,12 @@ async function handleRequest(
             mapping,
             segmentId: segment.id,
             layout: selected?.layout ?? null,
-            fitError:
-              selected?.fitError ??
-              (mapping.bubbleId
-                ? 'No caption layout was produced.'
-                : 'Choose a reviewed bubble candidate to fit this caption.'),
+            fitError: selected?.layout
+              ? selected.fitError
+              : (selected?.fitError ??
+                (mapping.bubbleId
+                  ? 'No caption layout was produced.'
+                  : 'Choose a reviewed bubble candidate to fit this caption.')),
             candidateLayouts,
           };
         }),

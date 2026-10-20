@@ -5,6 +5,7 @@ import {
   createVideoExportJob,
   downloadVideoExport,
   fetchVideoExportAvailability,
+  isVideoExportSuccess,
   waitForVideoExportJob,
   type VideoExportJobSummary,
   type VideoExportStyleOptions,
@@ -357,7 +358,7 @@ export function VideoExportPanel({
         onUpdate: setJob,
       });
       setJob(finished);
-      if (finished.status === 'succeeded') {
+      if (isVideoExportSuccess(finished.status)) {
         onMessage('Remotion MP4 export completed.');
       } else if (finished.status === 'cancelled') {
         onMessage('Remotion export cancelled.');
@@ -401,7 +402,7 @@ export function VideoExportPanel({
   ]);
 
   const download = useCallback(async () => {
-    if (!job || job.status !== 'succeeded') return;
+    if (!job || !isVideoExportSuccess(job.status)) return;
     try {
       const blob = await downloadVideoExport(job.id);
       const url = URL.createObjectURL(blob);
@@ -695,7 +696,7 @@ export function VideoExportPanel({
             Cancel render
           </button>
         )}
-        {job?.status === 'succeeded' && (
+        {isVideoExportSuccess(job?.status) && (
           <button
             className="editor-button"
             type="button"

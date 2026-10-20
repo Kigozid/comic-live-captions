@@ -122,7 +122,7 @@ describe('OCR service', () => {
 
     const wrongSpace = response();
     wrongSpace.blocks[0]!.lines[0]!.words[0]!.coordinateSpace =
-      createImageSpace('other-page', 120, 80);
+      createImageSpace('other-page', 200, 80);
     await expect(
       new ValidatingOCRService(providerFor(wrongSpace)).recognize({
         image: new Uint8Array([1]),
@@ -189,6 +189,42 @@ describe('OCR service', () => {
         },
       }),
     ).toThrow(/inside its image space/);
+  });
+
+  it('retargets same-page geometry under a different space id', async () => {
+    const otherSpace = createImageSpace('workspace:imported-page', 120, 80);
+    const remapped = {
+      ...response(),
+      coordinateSpace: otherSpace,
+      boundingBox: {
+        ...response().boundingBox,
+        coordinateSpace: otherSpace,
+      },
+      blocks: response().blocks.map((block) => ({
+        ...block,
+        coordinateSpace: otherSpace,
+        boundingBox: { ...block.boundingBox, coordinateSpace: otherSpace },
+        lines: block.lines.map((line) => ({
+          ...line,
+          coordinateSpace: otherSpace,
+          boundingBox: { ...line.boundingBox, coordinateSpace: otherSpace },
+          words: line.words.map((word) => ({
+            ...word,
+            coordinateSpace: otherSpace,
+            boundingBox: { ...word.boundingBox, coordinateSpace: otherSpace },
+          })),
+        })),
+      })),
+    };
+    const service = new ValidatingOCRService(providerFor(remapped));
+    const document = await service.recognize({
+      image: new Uint8Array([1]),
+      mediaType: 'image/png',
+      coordinateSpace: space,
+    });
+    expect(document.coordinateSpace.id).toBe(space.id);
+    expect(document.blocks[0]!.coordinateSpace.id).toBe(space.id);
+    expect(document.blocks[0]!.lines[0]!.text).toBe('HELLO');
   });
 
   it('surfaces provider failures without converting them into OCR output', async () => {

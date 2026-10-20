@@ -2580,8 +2580,10 @@ export function App() {
           Boolean(document.bubbles[dialogue.bubbleId]) &&
           (mapping?.bubbleId === undefined ||
             mapping.bubbleId === dialogue.bubbleId),
-        mappingConfidence: mapping?.confidence ?? null,
-        confidence: mapping?.confidence ?? null,
+        // Applied dialogues are user-accepted (draft/approve/edit); only an
+        // explicit low mapping score should block export.
+        mappingConfidence: mapping?.confidence ?? 1,
+        confidence: mapping?.confidence ?? 1,
       };
     });
     return { captions, bubbles };

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   LetteringRemovalError,
   LetteringRemover,
+  detectTextRegionsForInpaint,
   type GenerativeInpaintProvider,
   type LetteringRemovalResult,
   type LetteringSourceRegion,
@@ -173,13 +174,27 @@ export class CleanPageCoordinator {
       ...(bubble.outlineMask ? { outlineMask: bubble.outlineMask } : {}),
     }));
 
+    // Bubble-only requests still erase lettering: derive bubble-interior ink
+    // masks so `/api/clean-page` matches the web auto-clean path.
+    const suppliedRegions = request.textRegions ?? [];
+    const textRegions: readonly LetteringSourceRegion[] =
+      suppliedRegions.length > 0 || bubbles.length === 0
+        ? suppliedRegions
+        : detectTextRegionsForInpaint(image, bubbles).map((ink) => ({
+            id: `ink:${ink.id}`,
+            mask: ink.pixels,
+            boundingBox: ink.boundingBox,
+            detectionConfidence: ink.confidence,
+            associatedBubbleId: ink.bubbleId,
+          }));
+
     let result: LetteringRemovalResult;
     try {
       result = await this.#remover.removeLettering({
         image,
         coordinateSpace: space,
         bubbles,
-        textRegions: request.textRegions ?? [],
+        textRegions,
         manualEdits: request.manualEdits ?? [],
         ...(request.options ? { options: request.options } : {}),
       });

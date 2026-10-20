@@ -5,6 +5,8 @@ export interface VideoExportJobSummary {
     | 'preparing'
     | 'rendering'
     | 'validating'
+    | 'completed'
+    /** Legacy alias for `completed`. */
     | 'succeeded'
     | 'failed'
     | 'cancelled';
@@ -233,6 +235,22 @@ async function toBase64(
   return btoa(binary);
 }
 
+export function isVideoExportSuccess(
+  status: VideoExportJobSummary['status'] | string | undefined,
+): boolean {
+  return status === 'completed' || status === 'succeeded';
+}
+
+export function isVideoExportTerminal(
+  status: VideoExportJobSummary['status'] | string | undefined,
+): boolean {
+  return (
+    isVideoExportSuccess(status) ||
+    status === 'failed' ||
+    status === 'cancelled'
+  );
+}
+
 export async function waitForVideoExportJob(
   id: string,
   options: {
@@ -251,11 +269,7 @@ export async function waitForVideoExportJob(
     }
     const job = await getVideoExportJob(id);
     options.onUpdate?.(job);
-    if (
-      job.status === 'succeeded' ||
-      job.status === 'failed' ||
-      job.status === 'cancelled'
-    ) {
+    if (isVideoExportTerminal(job.status)) {
       return job;
     }
     if (Date.now() - started > timeout) {

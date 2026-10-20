@@ -53,9 +53,17 @@ export type VideoExportJobStatus =
   | 'preparing'
   | 'rendering'
   | 'validating'
+  | 'completed'
+  /** Legacy alias for `completed` kept for old job records. */
   | 'succeeded'
   | 'failed'
   | 'cancelled';
+
+export function isVideoExportSuccess(
+  status: VideoExportJobStatus | string | undefined,
+): boolean {
+  return status === 'completed' || status === 'succeeded';
+}
 
 export interface VideoExportJob {
   readonly id: string;
@@ -773,7 +781,7 @@ async function runJob(job: InternalJob): Promise<void> {
     await writeFile(finalPath, await readFile(outputPath));
 
     updateJob(job.id, {
-      status: 'succeeded',
+      status: 'completed',
       progress: 100,
       output: {
         fileName: 'video.mp4',
@@ -1031,7 +1039,7 @@ export function cancelVideoExportJob(id: string): VideoExportJob {
     throw new VideoExportError('NOT_FOUND', `Export job ${id} was not found.`);
   }
   if (
-    job.status === 'succeeded' ||
+    isVideoExportSuccess(job.status) ||
     job.status === 'failed' ||
     job.status === 'cancelled'
   ) {
@@ -1053,7 +1061,7 @@ export async function readVideoExportArtifact(
   if (!job) {
     throw new VideoExportError('NOT_FOUND', `Export job ${id} was not found.`);
   }
-  if (job.status !== 'succeeded' || !job.output) {
+  if (!isVideoExportSuccess(job.status) || !job.output) {
     throw new VideoExportError(
       'NOT_FOUND',
       `Export job ${id} has no downloadable artifact (status=${job.status}).`,

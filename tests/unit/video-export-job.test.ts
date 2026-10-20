@@ -6,6 +6,7 @@ import {
   checkVideoExportAvailability,
   createVideoExportJob,
   getVideoExportJob,
+  isVideoExportSuccess,
   readVideoExportArtifact,
   type VideoExportRequest,
 } from '../../apps/api/src/remotion-export.js';
@@ -42,6 +43,13 @@ afterAll(() => {
 });
 
 describe('Remotion video export job validation', () => {
+  it('treats completed and legacy succeeded as success', () => {
+    expect(isVideoExportSuccess('completed')).toBe(true);
+    expect(isVideoExportSuccess('succeeded')).toBe(true);
+    expect(isVideoExportSuccess('failed')).toBe(false);
+    expect(isVideoExportSuccess('rendering')).toBe(false);
+  });
+
   it('reports availability and licensing note without rendering', async () => {
     const availability = await checkVideoExportAvailability();
     expect(availability.maxConcurrentJobs).toBeGreaterThanOrEqual(1);

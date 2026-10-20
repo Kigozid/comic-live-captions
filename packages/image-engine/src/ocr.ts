@@ -284,7 +284,15 @@ function parseProvenance(value: unknown): Provenance {
 
 function parseSpace(value: unknown, expected: ImageSpace): ImageSpace {
   const space = asRecord(value, 'OCR coordinateSpace');
-  if (space.kind !== 'image' || space.id !== expected.id)
+  if (space.kind !== 'image')
+    throw new OCRError(`OCR geometry must use image space ${expected.id}.`);
+  // Same page under a different id (workspace:… vs image:…) is retargeted
+  // when dimensions match — alignment rewrites space ids after import.
+  const dims = asRecord(space.dimensions, 'OCR coordinateSpace dimensions');
+  const samePage =
+    Number(dims.width) === expected.dimensions.width &&
+    Number(dims.height) === expected.dimensions.height;
+  if (space.id !== expected.id && !samePage)
     throw new OCRError(`OCR geometry must use image space ${expected.id}.`);
   return expected;
 }

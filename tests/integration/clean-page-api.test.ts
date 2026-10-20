@@ -82,6 +82,46 @@ describe('CleanPageCoordinator', () => {
     expect(Buffer.from(image.data).equals(Buffer.from(snapshot))).toBe(true);
   });
 
+  it('erases bubble-interior ink when only bubbles are supplied', async () => {
+    const image = raster();
+    // Dark glyph pixels inside the balloon.
+    for (let y = 10; y < 14; y += 1) {
+      for (let x = 10; x < 14; x += 1) {
+        const i = (y * 32 + x) * 4;
+        image.data[i] = 5;
+        image.data[i + 1] = 5;
+        image.data[i + 2] = 5;
+      }
+    }
+    const coordinator = new CleanPageCoordinator({
+      encodePng: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+    });
+    const result = await coordinator.cleanPage({
+      image,
+      spaceId: space.id,
+      bubbles: [
+        {
+          id: 'bubble-1',
+          contour: {
+            points: [
+              { x: 5, y: 5 },
+              { x: 25, y: 5 },
+              { x: 25, y: 20 },
+              { x: 5, y: 20 },
+            ],
+          },
+          interiorHint: 'white-balloon',
+        },
+      ],
+    });
+    expect(result.regions.length).toBeGreaterThanOrEqual(1);
+    expect(result.methodSummary['white-fill'] + result.methodSummary['background-fill'] +
+      result.methodSummary['local-reconstruct']).toBeGreaterThanOrEqual(1);
+    let erased = 0;
+    for (const byte of result.removalMask) if (byte) erased += 1;
+    expect(erased).toBeGreaterThan(0);
+  });
+
   it('rejects oversized and malformed rasters', async () => {
     const coordinator = new CleanPageCoordinator();
     await expect(

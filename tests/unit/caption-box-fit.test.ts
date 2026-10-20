@@ -45,6 +45,51 @@ describe('fitCaptionIntoBox', () => {
     expect(large.fontSizePx).toBeGreaterThan(small.fontSizePx);
   });
 
+  it('keeps line corners inside an irregular bubble polygon', () => {
+    // Narrow diamond: bounding box is wide enough for text, but corners of a
+    // full-width line would fall outside the polygon.
+    const diamond = {
+      id: 'diamond',
+      points: [
+        { x: 100, y: 10 },
+        { x: 220, y: 80 },
+        { x: 100, y: 150 },
+        { x: 20, y: 80 },
+      ],
+    };
+    const layout = fitCaptionIntoBox(
+      diamond,
+      "They don't even let them air on Spotify or whatever.",
+      space,
+    );
+    const points = diamond.points;
+    const inside = (x: number, y: number) => {
+      let hit = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+        const xi = points[i]!.x;
+        const yi = points[i]!.y;
+        const xj = points[j]!.x;
+        const yj = points[j]!.y;
+        if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+          hit = !hit;
+        }
+      }
+      return hit;
+    };
+    for (const line of layout.linePlacements) {
+      const corners = [
+        { x: line.position.x, y: line.baselineY - line.heightPx },
+        { x: line.position.x + line.widthPx, y: line.baselineY - line.heightPx },
+        { x: line.position.x, y: line.baselineY },
+        { x: line.position.x + line.widthPx, y: line.baselineY },
+      ];
+      for (const corner of corners) {
+        expect(inside(corner.x, corner.y)).toBe(true);
+      }
+    }
+    expect(layout.fontSizePx).toBeLessThan(64);
+  });
+
   it('computes reading order top-to-bottom then LTR', () => {
     const boxes = [
       box('right', 200, 20),
