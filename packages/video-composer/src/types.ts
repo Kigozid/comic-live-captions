@@ -6,7 +6,11 @@
  * always expressed in page/image pixels and scaled to the output frame.
  */
 
-export type RevealMode = 'phrase' | 'word-by-word' | 'character-by-character';
+export type RevealMode =
+  | 'smooth-phrase'
+  | 'phrase'
+  | 'word-by-word'
+  | 'character-by-character';
 export type CaptionAlignment = 'left' | 'center' | 'right';
 export type CameraMode = 'none' | 'slow-zoom-in' | 'slow-zoom-out' | 'pan';
 export type TransitionKind = 'none' | 'fade' | 'crossfade';

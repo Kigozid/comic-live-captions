@@ -59,26 +59,43 @@ function caption(
   };
 }
 
-/** Count fully-revealed word tspans (fill-opacity="1"). */
+/** Count word tspans that are visible (fill-opacity > 0). */
 function revealedCount(svg: string): number {
-  return svg.split('fill-opacity="1"').length - 1;
+  const matches = svg.match(/fill-opacity="([^"]+)"/g) ?? [];
+  return matches.filter((entry) => {
+    const value = Number(entry.match(/fill-opacity="([^"]+)"/)?.[1] ?? 0);
+    return value > 0;
+  }).length;
 }
 
 describe('renderTimedCaptionLayerSvg — progressive word reveal', () => {
   it('10. reveals words progressively instead of the full sentence at once', () => {
     const item = caption('c1', 'b1', 1, 2); // 5 words over [1, 2]
-    const before = renderTimedCaptionLayerSvg(200, 200, [item], 1.1);
-    const mid = renderTimedCaptionLayerSvg(200, 200, [item], 1.5);
-    const end = renderTimedCaptionLayerSvg(200, 200, [item], 2.0);
+    const opts = { revealMode: 'word-by-word' as const };
+    const before = renderTimedCaptionLayerSvg(200, 200, [item], 1.1, opts);
+    const mid = renderTimedCaptionLayerSvg(200, 200, [item], 1.5, opts);
+    const end = renderTimedCaptionLayerSvg(200, 200, [item], 2.0, opts);
 
     // Before the caption starts: bubble stays empty (no words rendered).
-    expect(renderTimedCaptionLayerSvg(200, 200, [item], 0.5)).not.toContain(
+    expect(renderTimedCaptionLayerSvg(200, 200, [item], 0.5, opts)).not.toContain(
       '<tspan',
     );
     // Progressive: more words revealed as time advances, never all at once early.
     expect(revealedCount(before)).toBe(1);
     expect(revealedCount(mid)).toBe(3);
     expect(revealedCount(end)).toBe(5);
+  });
+
+  it('smooth-phrase reveals 2–3 word chunks instead of a single word', () => {
+    const item = caption('c1', 'b1', 1, 2);
+    const early = renderTimedCaptionLayerSvg(200, 200, [item], 1.05, {
+      revealMode: 'smooth-phrase',
+      fadeInSeconds: 0,
+    });
+    // First chunk is a readable phrase, not the whole sentence.
+    const count = revealedCount(early);
+    expect(count).toBeGreaterThanOrEqual(2);
+    expect(count).toBeLessThan(5);
   });
 
   it('keeps the next bubble empty until its own dialogue begins', () => {
@@ -179,8 +196,12 @@ describe('timedCaptionLayoutsFromExport — shared export → reveal bridge', ()
         ],
       },
     ]);
-    const before = renderTimedCaptionLayerSvg(200, 200, timed, 1.1);
-    const mid = renderTimedCaptionLayerSvg(200, 200, timed, 1.5);
+    const before = renderTimedCaptionLayerSvg(200, 200, timed, 1.1, {
+      revealMode: 'word-by-word',
+    });
+    const mid = renderTimedCaptionLayerSvg(200, 200, timed, 1.5, {
+      revealMode: 'word-by-word',
+    });
     expect(revealedCount(before)).toBe(1);
     expect(revealedCount(mid)).toBeLessThan(5);
   });

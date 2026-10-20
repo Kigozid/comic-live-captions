@@ -33,7 +33,11 @@ export interface VideoExportAvailability {
   readonly jobs: readonly VideoExportJobSummary[];
 }
 
-export type CaptionRevealMode = 'phrase' | 'word-by-word' | 'character-by-character';
+export type CaptionRevealMode =
+  | 'smooth-phrase'
+  | 'phrase'
+  | 'word-by-word'
+  | 'character-by-character';
 export type BubbleReusePolicy = 'retain' | 'replace' | 'clear';
 
 export interface VideoExportStyleOptions {

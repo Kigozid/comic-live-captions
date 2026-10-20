@@ -268,14 +268,18 @@ const CaptionWords: React.FC<{
         // Word/phrase modes keep full word width reserved (stable layout) and
         // toggle visibility; character mode grows the visible substring.
         const content = charMode ? state.text : span.text;
-        const shown = charMode ? state.text.length > 0 : state.revealed;
+        const opacity = charMode
+          ? state.text.length > 0
+            ? 1
+            : 0
+          : state.opacity;
         return (
           <span
             key={`${span.wordIndex}`}
             style={{
               display: 'inline-block',
               marginRight: fontSizePx * 0.28,
-              opacity: shown ? 1 : 0,
+              opacity,
               color: isActive ? '#7c3aed' : undefined,
               transform: `scale(${emphasisScale})`,
               transformOrigin: 'left center',
