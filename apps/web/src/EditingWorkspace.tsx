@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { SourceImageMetadata } from '@comic-captioner/shared';
 import { createImageSpace } from '@comic-captioner/shared';
 import type { DialogueMapping } from '@comic-captioner/core';
-import { captionRevealAt, synthesizeRevealTokens } from '@comic-captioner/core';
+import { captionRevealAt, normalizeRevealTokens } from '@comic-captioner/core';
 import type { ClockSnapshot, Transcript } from '@comic-captioner/audio-engine';
 import { emptyEditorHistory, editorReducer } from './editor-model.js';
 import type { EditorDocument } from './editor-model.js';
@@ -1290,7 +1290,7 @@ export function EditingWorkspace({
                 })}
               {Object.values(document.dialogues).map((dialogue) => {
                 const words = dialogue.caption.split(/\s+/).filter(Boolean);
-                const realWords =
+                const providedWords =
                   dialogue.words && dialogue.words.length === words.length
                     ? dialogue.words.map((word) => ({
                         text: word.text,
@@ -1304,14 +1304,12 @@ export function EditingWorkspace({
                           startSeconds: word.start.value,
                           endSeconds: word.end.value,
                         }));
-                const tokens =
-                  realWords && realWords.length === words.length
-                    ? realWords
-                    : synthesizeRevealTokens(
-                        dialogue.caption,
-                        dialogue.start,
-                        dialogue.end,
-                      );
+                const tokens = normalizeRevealTokens(
+                  providedWords,
+                  dialogue.caption,
+                  dialogue.start,
+                  dialogue.end,
+                );
                 const reveal = liveCaptions
                   ? captionRevealAt(tokens, previewTime, {
                       mode: 'word-by-word',

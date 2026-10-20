@@ -254,6 +254,64 @@ export function synthesizeRevealTokens(
   }));
 }
 
+/**
+ * True when provided word timings can drive a genuine typewriter reveal.
+ *
+ * Rejects the failure modes that dump a full caption at once:
+ *  - non-finite or inverted spans
+ *  - every word sharing the same start (collapsed to the cue)
+ *  - starts that go backwards
+ *  - multi-word cues whose tokens all begin before the first word would finish
+ */
+export function areProgressiveWordTimings(
+  tokens: readonly RevealToken[],
+  cueStartSeconds: number,
+  cueEndSeconds: number,
+): boolean {
+  if (tokens.length === 0) return false;
+  if (!Number.isFinite(cueStartSeconds) || !Number.isFinite(cueEndSeconds))
+    return false;
+  if (cueEndSeconds <= cueStartSeconds) return false;
+  let previousStart = -Infinity;
+  let distinctStarts = 0;
+  for (const token of tokens) {
+    const { startSeconds, endSeconds } = token;
+    if (
+      !Number.isFinite(startSeconds) ||
+      !Number.isFinite(endSeconds) ||
+      endSeconds < startSeconds
+    )
+      return false;
+    // Allow a tiny tolerance past the cue bounds for ASR rounding.
+    if (startSeconds < cueStartSeconds - 0.25) return false;
+    if (endSeconds > cueEndSeconds + 0.25) return false;
+    if (startSeconds < previousStart) return false;
+    if (startSeconds > previousStart) distinctStarts += 1;
+    previousStart = startSeconds;
+  }
+  // A single token is fine (one-word line). Multiple tokens must not all
+  // share one start time — that reveals the whole sentence at once.
+  if (tokens.length > 1 && distinctStarts < 2) return false;
+  return true;
+}
+
+/**
+ * Prefer acoustic word timings when they actually stagger; otherwise fall
+ * back to even slices so the typewriter effect is never replaced by a
+ * one-shot full-line dump. Never claims estimated slices are acoustic.
+ */
+export function normalizeRevealTokens(
+  provided: readonly RevealToken[] | undefined,
+  text: string,
+  cueStartSeconds: number,
+  cueEndSeconds: number,
+): readonly RevealToken[] {
+  if (provided && areProgressiveWordTimings(provided, cueStartSeconds, cueEndSeconds)) {
+    return provided;
+  }
+  return synthesizeRevealTokens(text, cueStartSeconds, cueEndSeconds);
+}
+
 /** Minimal shape `activeCaptionsAt` needs from a timed caption. */
 export interface RevealCaptionRef {
   readonly id: string;

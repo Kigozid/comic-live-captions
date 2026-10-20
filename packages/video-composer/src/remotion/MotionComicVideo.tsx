@@ -10,6 +10,7 @@ import {
   activeCaptionsAt,
   assignTokenSpans,
   captionRevealAt,
+  normalizeRevealTokens,
   type CaptionRevealState,
   type RevealToken,
 } from '@comic-captioner/core';
@@ -212,22 +213,6 @@ function captionOpacity(
  * word timestamps. Marked `estimated` so diagnostics can distinguish them from
  * real forced-alignment timings.
  */
-function synthesizeTokens(
-  text: string,
-  startSeconds: number,
-  endSeconds: number,
-): RevealToken[] {
-  const parts = splitWords(text);
-  const span = Math.max(0, endSeconds - startSeconds);
-  const slice = span / Math.max(1, parts.length);
-  return parts.map((word, index) => ({
-    text: word,
-    startSeconds: startSeconds + index * slice,
-    endSeconds: startSeconds + (index + 1) * slice,
-    estimated: true,
-  }));
-}
-
 const CaptionWords: React.FC<{
   readonly line: FittedCaptionLine;
   readonly spans: readonly LineWordSpan[];
@@ -316,14 +301,19 @@ const CueLayer: React.FC<{
   const style = props.captionStyle;
 
   // One token stream for the whole caption drives both reveal and line mapping.
-  const timedTokens: readonly RevealToken[] =
+  // Collapsed acoustic timings fall back to even slices — never a full-line dump.
+  const timedTokens: readonly RevealToken[] = normalizeRevealTokens(
     cue.words.length > 0
       ? cue.words.map((word) => ({
           text: word.text,
           startSeconds: word.startSeconds,
           endSeconds: word.endSeconds,
         }))
-      : synthesizeTokens(cue.text, cue.startSeconds, cue.endSeconds);
+      : undefined,
+    cue.text,
+    cue.startSeconds,
+    cue.endSeconds,
+  );
   const tokens = assignTokenSpans(cue.text, timedTokens);
 
   const reveal = captionRevealAt(tokens, timeSeconds, {
