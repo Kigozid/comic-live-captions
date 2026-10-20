@@ -4,6 +4,7 @@ import type { SourceImageMetadata } from '@comic-captioner/shared';
 import { createImageSpace } from '@comic-captioner/shared';
 import type { DialogueMapping } from '@comic-captioner/core';
 import { captionRevealAt, normalizeRevealTokens } from '@comic-captioner/core';
+import { rescaleWordsToCue } from './word-timing-edit.js';
 import type { ClockSnapshot, Transcript } from '@comic-captioner/audio-engine';
 import { emptyEditorHistory, editorReducer } from './editor-model.js';
 import type { EditorDocument } from './editor-model.js';
@@ -146,6 +147,10 @@ export function EditingWorkspace({
   const imageWidth = image?.metadata.dimensions.width;
   const imageHeight = image?.metadata.dimensions.height;
   const [history, dispatch] = useReducer(editorReducer, emptyEditorHistory);
+  const documentRef = useRef<EditorDocument | null>(null);
+  useEffect(() => {
+    documentRef.current = history.present;
+  }, [history.present]);
   useEffect(() => {
     const onUndo = () => dispatch({ type: 'undo' });
     const onRedo = () => dispatch({ type: 'redo' });
@@ -223,10 +228,44 @@ export function EditingWorkspace({
         event as CustomEvent<{ id: string; start: number; end: number }>
       ).detail;
       if (!detail?.id) return;
+      const current = documentRef.current?.dialogues[detail.id];
+      const patch: {
+        start: number;
+        end: number;
+        words?: readonly { text: string; start: number; end: number }[];
+      } = { start: detail.start, end: detail.end };
+      if (current?.words && current.words.length > 0) {
+        patch.words = rescaleWordsToCue(
+          current.words,
+          detail.start,
+          detail.end,
+        );
+      }
       dispatch({
         type: 'edit-dialogue',
         dialogueId: detail.id,
-        patch: { start: detail.start, end: detail.end },
+        patch,
+      });
+    };
+    const onCaptionWords = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          id: string;
+          words: readonly { text: string; start: number; end: number }[];
+        }>
+      ).detail;
+      if (!detail?.id || !Array.isArray(detail.words)) return;
+      dispatch({
+        type: 'edit-dialogue',
+        dialogueId: detail.id,
+        patch: {
+          words: detail.words.map((word) => ({
+            text: String(word.text ?? ''),
+            start: Number(word.start),
+            end: Number(word.end),
+          })),
+        },
+        coalesce: { key: `words:${detail.id}`, atMs: Date.now() },
       });
     };
     const onBubbleGeometry = (event: Event) => {
@@ -274,12 +313,14 @@ export function EditingWorkspace({
     window.addEventListener('comic-editor-caption-text', onCaptionText);
     window.addEventListener('comic-editor-caption-font', onCaptionFont);
     window.addEventListener('comic-editor-caption-time', onCaptionTime);
+    window.addEventListener('comic-editor-caption-words', onCaptionWords);
     window.addEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
     window.addEventListener('comic-editor-split-dialogue', onSplitDialogue);
     return () => {
       window.removeEventListener('comic-editor-caption-text', onCaptionText);
       window.removeEventListener('comic-editor-caption-font', onCaptionFont);
       window.removeEventListener('comic-editor-caption-time', onCaptionTime);
+      window.removeEventListener('comic-editor-caption-words', onCaptionWords);
       window.removeEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
       window.removeEventListener('comic-editor-split-dialogue', onSplitDialogue);
     };
@@ -342,6 +383,7 @@ export function EditingWorkspace({
                 endSeconds: dialogue.end,
                 fontFamily: dialogue.fontFamily,
                 fontSizePx: dialogue.fontSizePx,
+                ...(dialogue.words ? { words: dialogue.words } : {}),
               }
             : null,
         },

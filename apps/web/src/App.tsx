@@ -585,6 +585,7 @@ export function App() {
       endSeconds: number;
       fontFamily: string;
       fontSizePx: number;
+      words?: readonly { text: string; start: number; end: number }[];
     } | null;
   } | null>(null);
 
@@ -2824,6 +2825,8 @@ export function App() {
         endSeconds: caption.endSeconds,
         fontFamily: caption.fontFamily,
         fontSizePx: caption.fontSizePx,
+        ...(caption.words ? { words: caption.words } : {}),
+        estimated: !caption.words?.length,
         onTextChange: (value) =>
           window.dispatchEvent(
             new CustomEvent('comic-editor-caption-text', {
@@ -2840,6 +2843,12 @@ export function App() {
           window.dispatchEvent(
             new CustomEvent('comic-editor-caption-font', {
               detail: { id: caption.id, fontSizePx: value },
+            }),
+          ),
+        onWordsChange: (words) =>
+          window.dispatchEvent(
+            new CustomEvent('comic-editor-caption-words', {
+              detail: { id: caption.id, words },
             }),
           ),
       };
@@ -2883,6 +2892,32 @@ export function App() {
           endSeconds: dialogue.end,
           fontFamily: dialogue.fontFamily,
           fontSizePx: dialogue.fontSizePx,
+          ...(dialogue.words ? { words: dialogue.words } : {}),
+          estimated: !dialogue.words?.length,
+          onTextChange: (value) =>
+            window.dispatchEvent(
+              new CustomEvent('comic-editor-caption-text', {
+                detail: { id: dialogue.id, text: value },
+              }),
+            ),
+          onTimeChange: (start, end) =>
+            window.dispatchEvent(
+              new CustomEvent('comic-editor-caption-time', {
+                detail: { id: dialogue.id, start, end },
+              }),
+            ),
+          onFontSizeChange: (value) =>
+            window.dispatchEvent(
+              new CustomEvent('comic-editor-caption-font', {
+                detail: { id: dialogue.id, fontSizePx: value },
+              }),
+            ),
+          onWordsChange: (words) =>
+            window.dispatchEvent(
+              new CustomEvent('comic-editor-caption-words', {
+                detail: { id: dialogue.id, words },
+              }),
+            ),
         };
       }
     }

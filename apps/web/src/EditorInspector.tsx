@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { IconClose, IconEye, IconLock } from './editor-icons.js';
 import { WorkspaceInspectorSlot } from './WorkspaceInspectorSlot.js';
+import { WordTimingEditor } from './WordTimingEditor.js';
+import type { EditableWordTiming } from './word-timing-edit.js';
 
 export type InspectorSelection =
   | { kind: 'none' }
@@ -44,11 +46,14 @@ export type InspectorSelection =
       text: string;
       startSeconds: number;
       endSeconds: number;
-      fontFamily?: string;
-      fontSizePx?: number;
-      onTextChange?: (value: string) => void;
-      onTimeChange?: (start: number, end: number) => void;
-      onFontSizeChange?: (value: number) => void;
+      fontFamily?: string | undefined;
+      fontSizePx?: number | undefined;
+      words?: readonly EditableWordTiming[] | undefined;
+      estimated?: boolean | undefined;
+      onTextChange?: ((value: string) => void) | undefined;
+      onTimeChange?: ((start: number, end: number) => void) | undefined;
+      onFontSizeChange?: ((value: number) => void) | undefined;
+      onWordsChange?: ((words: readonly EditableWordTiming[]) => void) | undefined;
     }
   | {
       kind: 'audio';
@@ -433,6 +438,16 @@ export function EditorInspector({
                   aria-label="Caption end"
                 />
               </Row>
+            </Section>
+            <Section title="Word cues">
+              <WordTimingEditor
+                captionText={selection.text}
+                startSeconds={selection.startSeconds}
+                endSeconds={selection.endSeconds}
+                words={selection.words}
+                estimated={selection.estimated}
+                onWordsChange={selection.onWordsChange}
+              />
             </Section>
           </>
         )}
