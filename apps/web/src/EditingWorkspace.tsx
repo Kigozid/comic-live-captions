@@ -268,6 +268,38 @@ export function EditingWorkspace({
         coalesce: { key: `words:${detail.id}`, atMs: Date.now() },
       });
     };
+    const onApplyMappings = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          items: readonly {
+            bubbleId: string;
+            caption: string;
+            start: number;
+            end: number;
+            words?: readonly { text: string; start: number; end: number }[];
+          }[];
+        }>
+      ).detail;
+      if (!detail?.items?.length) return;
+      dispatch({
+        type: 'apply-mappings',
+        items: detail.items.map((item) => ({
+          bubbleId: item.bubbleId,
+          caption: item.caption,
+          start: item.start,
+          end: item.end,
+          ...(item.words
+            ? {
+                words: item.words.map((word) => ({
+                  text: String(word.text ?? ''),
+                  start: Number(word.start),
+                  end: Number(word.end),
+                })),
+              }
+            : {}),
+        })),
+      });
+    };
     const onBubbleGeometry = (event: Event) => {
       const detail = (
         event as CustomEvent<{
@@ -314,6 +346,7 @@ export function EditingWorkspace({
     window.addEventListener('comic-editor-caption-font', onCaptionFont);
     window.addEventListener('comic-editor-caption-time', onCaptionTime);
     window.addEventListener('comic-editor-caption-words', onCaptionWords);
+    window.addEventListener('comic-editor-apply-mappings', onApplyMappings);
     window.addEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
     window.addEventListener('comic-editor-split-dialogue', onSplitDialogue);
     return () => {
@@ -321,6 +354,7 @@ export function EditingWorkspace({
       window.removeEventListener('comic-editor-caption-font', onCaptionFont);
       window.removeEventListener('comic-editor-caption-time', onCaptionTime);
       window.removeEventListener('comic-editor-caption-words', onCaptionWords);
+      window.removeEventListener('comic-editor-apply-mappings', onApplyMappings);
       window.removeEventListener('comic-editor-bubble-geometry', onBubbleGeometry);
       window.removeEventListener('comic-editor-split-dialogue', onSplitDialogue);
     };
@@ -342,6 +376,7 @@ export function EditingWorkspace({
   const [showDetection, setShowDetection] = useState(true);
   const [canvasMode, setCanvasMode] = useState<'select' | 'bubble'>('select');
   const [liveCaptions, setLiveCaptions] = useState(true);
+  const [reassignMode, setReassignMode] = useState(false);
   const [selectedDialogueId, setSelectedDialogueId] = useState<string | null>(
     null,
   );
@@ -675,6 +710,28 @@ export function EditingWorkspace({
     event: ReactPointerEvent<SVGPolygonElement>,
     bubbleId: string,
   ) {
+    // Scrub-and-fix: clicking a bubble while reassign mode is on moves the
+    // selected (or currently playing) dialogue onto that bubble.
+    if (reassignMode && document) {
+      const at = audioClock?.positionSeconds ?? 0;
+      const playing = Object.values(document.dialogues).find(
+        (item) => at >= item.start && at < item.end,
+      );
+      const dialogueId = selectedDialogueId ?? playing?.id ?? null;
+      const dialogue = dialogueId ? document.dialogues[dialogueId] : undefined;
+      if (dialogue && dialogue.bubbleId !== bubbleId) {
+        commit({
+          type: 'edit-dialogue',
+          dialogueId: dialogue.id,
+          patch: { bubbleId: bubbleId as typeof dialogue.bubbleId },
+        });
+        setSelectedBubbleId(bubbleId);
+        setSelectedBubbleIds([bubbleId]);
+        setSelectedDialogueId(dialogue.id);
+        setReassignMode(false);
+        return;
+      }
+    }
     const additive = event.shiftKey || event.ctrlKey || event.metaKey;
     if (additive) {
       setSelectedBubbleIds((selected) =>
@@ -1001,6 +1058,15 @@ export function EditingWorkspace({
           title="Preview live word-by-word captions synced to the audio clock"
         >
           {liveCaptions ? 'Live captions: on' : 'Live captions: off'}
+        </button>
+        <button
+          className={`canvas-mode-button ${reassignMode ? 'is-active' : ''}`}
+          aria-pressed={reassignMode}
+          onClick={() => setReassignMode((on) => !on)}
+          type="button"
+          title="Click a bubble to move the selected/playing dialogue onto it"
+        >
+          {reassignMode ? 'Pick bubble…' : 'Reassign'}
         </button>
         <button
           className="canvas-mode-button"
