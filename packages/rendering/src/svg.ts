@@ -2,6 +2,7 @@ import type { CaptionLayout } from '@comic-captioner/core';
 import {
   activeCaptionsAt,
   captionRevealAt,
+  synthesizeRevealTokens,
   type BubbleReusePolicy,
   type CaptionRevealMode,
   type RevealToken,
@@ -78,6 +79,64 @@ export interface TimedCaptionLayout {
   readonly words?: readonly RevealToken[];
   readonly startSeconds: number;
   readonly endSeconds: number;
+}
+
+/** Word timings as they appear on export payloads (seconds, not AudioTime). */
+export interface ExportWordTiming {
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Convert export captions into timed layouts for progressive reveal.
+ *
+ * Real acoustic word timings are preferred; when they are missing or their
+ * token count does not match the fitted layout, even slices across the cue
+ * interval are synthesized so typewriter reveal still works offline.
+ */
+export function timedCaptionLayoutsFromExport(
+  captions: readonly {
+    readonly layout: CaptionLayout | null;
+    readonly start: number | null;
+    readonly end: number | null;
+    readonly words?: readonly ExportWordTiming[] | undefined;
+  }[],
+): TimedCaptionLayout[] {
+  const result: TimedCaptionLayout[] = [];
+  for (const caption of captions) {
+    if (
+      !caption.layout ||
+      caption.start === null ||
+      caption.end === null ||
+      !Number.isFinite(caption.start) ||
+      !Number.isFinite(caption.end)
+    )
+      continue;
+    const layoutWords = caption.layout.linePlacements
+      .flatMap((line) => line.text.split(/\s+/))
+      .filter((part) => part.length > 0);
+    const provided = caption.words ?? [];
+    const words: readonly RevealToken[] =
+      provided.length === layoutWords.length && provided.length > 0
+        ? provided.map((word, index) => ({
+            text: layoutWords[index]!,
+            startSeconds: word.start,
+            endSeconds: word.end,
+          }))
+        : synthesizeRevealTokens(
+            layoutWords.join(' '),
+            caption.start,
+            caption.end,
+          );
+    result.push({
+      layout: caption.layout,
+      startSeconds: caption.start,
+      endSeconds: caption.end,
+      words,
+    });
+  }
+  return result;
 }
 
 export interface TimedCaptionRenderOptions {

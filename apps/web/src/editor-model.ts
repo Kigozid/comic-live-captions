@@ -37,12 +37,20 @@ export interface EditableBubble {
   readonly reviewStatus?: BubbleReviewStatus;
 }
 
+export interface DialogueWordTiming {
+  readonly text: string;
+  readonly start: number;
+  readonly end: number;
+}
+
 export interface EditableDialogue {
   readonly id: string;
   readonly bubbleId: BubbleId;
   readonly caption: string;
   readonly start: number;
   readonly end: number;
+  /** Acoustic word timings for typewriter reveal; omitted → even slices. */
+  readonly words?: readonly DialogueWordTiming[];
   readonly fontFamily: string;
   readonly fontSizePx: number;
   readonly lineSpacingPx: number;
@@ -156,6 +164,7 @@ export type EditorAction =
           | 'caption'
           | 'start'
           | 'end'
+          | 'words'
           | 'fontFamily'
           | 'fontSizePx'
           | 'lineSpacingPx'
@@ -934,11 +943,23 @@ export function editorReducer(
     if (!Number.isFinite(at) || at <= current.start + 0.01 || at >= current.end - 0.01) {
       return state;
     }
-    const first = Object.freeze({ ...current, end: at });
+    const splitWords = (
+      from: number,
+      to: number,
+    ): readonly DialogueWordTiming[] =>
+      (current.words ?? []).filter(
+        (word) => word.start >= from - 1e-6 && word.end <= to + 1e-6,
+      );
+    const first = Object.freeze({
+      ...current,
+      end: at,
+      ...(current.words ? { words: splitWords(current.start, at) } : {}),
+    });
     const second = Object.freeze({
       ...current,
       id: action.newDialogueId,
       start: at,
+      ...(current.words ? { words: splitWords(at, current.end) } : {}),
     });
     const order = [...document.order];
     const index = order.indexOf(action.dialogueId);

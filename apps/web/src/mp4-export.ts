@@ -1,10 +1,6 @@
-import type { CaptionLayout } from '@comic-captioner/core';
-import { TimelineEngine } from '../../../packages/caption-engine/src/timeline.js';
-import type { DialogueEvent } from '@comic-captioner/core';
-import type { AudioTimebaseId } from '@comic-captioner/shared';
 import {
-  captionMotionAtTime,
-  renderCaptionLayerSvg,
+  renderTimedCaptionLayerSvg,
+  timedCaptionLayoutsFromExport,
 } from '../../../packages/rendering/src/svg.js';
 import { validateFrameExport } from '../../../packages/rendering/src/validation.js';
 import type {
@@ -55,18 +51,6 @@ export async function exportMp4(
     throw new Error(
       `Export validation failed: ${validation.issues.map((issue) => `${issue.captionId}: ${issue.code}`).join(', ')}`,
     );
-  const timebase = 'audio:mp4-export' as AudioTimebaseId;
-  const timeline = new TimelineEngine(
-    captions.map((caption): DialogueEvent => ({
-      id: caption.id,
-      bubbleId: caption.bubbleId,
-      caption: caption.caption,
-      start: { value: caption.start!, timebase, unit: 'seconds' },
-      end: { value: caption.end!, timebase, unit: 'seconds' },
-      layout: caption.layout as CaptionLayout,
-      confidence: caption.confidence!,
-    })),
-  );
   const { width, height } = resolveMp4Dimensions(options);
   const comic = await createImageBitmap(cleanedComic);
   const canvas = document.createElement('canvas');
@@ -186,25 +170,14 @@ export async function exportMp4(
           context.fillStyle = '#000';
           context.fillRect(0, 0, width, height);
           context.drawImage(comic, offsetX, offsetY, pageWidth, pageHeight);
-          const activeEvent = timeline.getActiveDialogue({
-            value: time,
-            timebase,
-            unit: 'seconds',
-          });
-          const layouts = activeEvent ? [activeEvent.layout] : [];
+          const timed = timedCaptionLayoutsFromExport(captions);
           const svgBlob = new Blob(
             [
-              renderCaptionLayerSvg(
+              renderTimedCaptionLayerSvg(
                 comic.width,
                 comic.height,
-                layouts,
-                activeEvent
-                  ? captionMotionAtTime(
-                      activeEvent.start.value,
-                      activeEvent.end.value,
-                      time,
-                    )
-                  : undefined,
+                timed,
+                time,
               ),
             ],
             { type: 'image/svg+xml' },

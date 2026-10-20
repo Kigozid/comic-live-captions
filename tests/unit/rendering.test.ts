@@ -77,6 +77,87 @@ describe('layered rendering primitives', () => {
     expect(svg).toContain('y="8"');
   });
 
+  it('renderFrame reveals words progressively instead of dumping the full line', async () => {
+    const source = await sharp({
+      create: {
+        width: 16,
+        height: 16,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const bubble = {
+      id: 'bubble-1' as BubbleId,
+      polygon: {
+        points: [
+          { x: 0, y: 0 },
+          { x: 16, y: 0 },
+          { x: 16, y: 16 },
+          { x: 0, y: 16 },
+        ],
+        coordinateSpace: space,
+      },
+    };
+    const multiWord = layout('One two three four');
+    const engine = new RenderingEngine();
+    const early = await engine.renderFrame({
+      sourceImage: source,
+      captions: [
+        {
+          id: 'cue-1',
+          bubbleId: bubble.id,
+          caption: 'One two three four',
+          layout: multiWord,
+          start: 1,
+          end: 2,
+          mappingConfidence: 0.9,
+          mapped: true,
+          confidence: 0.9,
+          words: [
+            { text: 'One', start: 1, end: 1.2 },
+            { text: 'two', start: 1.2, end: 1.4 },
+            { text: 'three', start: 1.4, end: 1.7 },
+            { text: 'four', start: 1.7, end: 2 },
+          ],
+        },
+      ],
+      bubbles: [bubble],
+      time: 1.1,
+      format: 'png',
+    });
+    const late = await engine.renderFrame({
+      sourceImage: source,
+      captions: [
+        {
+          id: 'cue-1',
+          bubbleId: bubble.id,
+          caption: 'One two three four',
+          layout: multiWord,
+          start: 1,
+          end: 2,
+          mappingConfidence: 0.9,
+          mapped: true,
+          confidence: 0.9,
+          words: [
+            { text: 'One', start: 1, end: 1.2 },
+            { text: 'two', start: 1.2, end: 1.4 },
+            { text: 'three', start: 1.4, end: 1.7 },
+            { text: 'four', start: 1.7, end: 2 },
+          ],
+        },
+      ],
+      bubbles: [bubble],
+      time: 1.9,
+      format: 'png',
+    });
+    // Different reveal states must produce different frames.
+    expect(Buffer.compare(early, late)).not.toBe(0);
+    const earlyMeta = await sharp(early).metadata();
+    expect(earlyMeta.width).toBe(16);
+  });
+
   it('keeps debug geometry in its own SVG layer', () => {
     expect(
       renderDebugLayerSvg(16, 16, [

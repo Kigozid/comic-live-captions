@@ -2,8 +2,11 @@ import { useMemo } from 'react';
 import type { CaptionLayout } from '@comic-captioner/core';
 import {
   renderCaptionLayerSvg,
+  renderTimedCaptionLayerSvg,
   renderDebugLayerSvg,
   captionMotionAtTime,
+  timedCaptionLayoutsFromExport,
+  type ExportWordTiming,
 } from '../../../packages/rendering/src/svg.js';
 import type { RenderDebugOverlay } from '../../../packages/rendering/src/svg.js';
 
@@ -18,6 +21,9 @@ export function LayeredComicRenderer({
   motionTimeSeconds,
   motionStartSeconds,
   motionEndSeconds,
+  /** When set with `timed`, captions reveal word-by-word at this playback time. */
+  playbackTimeSeconds,
+  timed,
 }: {
   readonly src: string;
   readonly width: number;
@@ -28,6 +34,15 @@ export function LayeredComicRenderer({
   readonly motionTimeSeconds?: number | undefined;
   readonly motionStartSeconds?: number | undefined;
   readonly motionEndSeconds?: number | undefined;
+  readonly playbackTimeSeconds?: number | undefined;
+  readonly timed?:
+    | readonly {
+        readonly layout: CaptionLayout | null;
+        readonly start: number | null;
+        readonly end: number | null;
+        readonly words?: readonly ExportWordTiming[] | undefined;
+      }[]
+    | undefined;
 }) {
   const motion = useMemo(
     () =>
@@ -42,10 +57,21 @@ export function LayeredComicRenderer({
         : undefined,
     [motionEndSeconds, motionStartSeconds, motionTimeSeconds],
   );
-  const captionSvg = useMemo(
-    () => renderCaptionLayerSvg(width, height, layouts, motion),
-    [width, height, layouts, motion],
-  );
+  const useTimed =
+    playbackTimeSeconds !== undefined &&
+    Number.isFinite(playbackTimeSeconds) &&
+    timed !== undefined;
+  const captionSvg = useMemo(() => {
+    if (useTimed) {
+      return renderTimedCaptionLayerSvg(
+        width,
+        height,
+        timedCaptionLayoutsFromExport(timed),
+        playbackTimeSeconds!,
+      );
+    }
+    return renderCaptionLayerSvg(width, height, layouts, motion);
+  }, [useTimed, width, height, timed, playbackTimeSeconds, layouts, motion]);
   const debugSvg = useMemo(
     () => renderDebugLayerSvg(width, height, debugOverlays),
     [width, height, debugOverlays],
