@@ -64,6 +64,10 @@ describe('API health endpoint', () => {
         geminiTranscriptionConfigured: Boolean(process.env.GEMINI_API_KEY),
         transcriptionProvider: expect.any(String),
         ocrEngine: expect.any(String),
+        assistProvider:
+          process.env.MIMO_API_KEY || process.env.GEMINI_API_KEY
+            ? expect.stringMatching(/^(mimo|gemini)$/)
+            : null,
       },
     });
   });
